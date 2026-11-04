@@ -219,6 +219,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
       }
     }
+    // Ground truth of the live store after the batch (persistence is
+    // timer-based and can lag under webview throttling).
+    void debugLog(
+      `upsertDone conv=${convId} tail=` +
+        (get().byConv[convId] ?? [])
+          .slice(-3)
+          .map((x) => `${x.key.slice(0, 10)}:len${x.original.length}:tr${(x.translation ?? '').length}:w${x.working ? 1 : 0}`)
+          .join(','),
+    );
   },
 
   appendDelta: (convId, key, delta) =>
