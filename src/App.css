@@ -201,7 +201,81 @@ html, body, #root {
 .bubble.ai { background: var(--bg-raised); border: 1px solid var(--border); }
 
 .bubble-text { white-space: pre-wrap; }
+.bubble-text:has(.md) { white-space: normal; }
 .bubble-placeholder { color: var(--fg-muted); font-style: italic; }
+
+/* ---------- markdown ---------- */
+
+.md { font-size: 13.5px; line-height: 1.65; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+
+.md p { margin: 0.5em 0; }
+.md h1, .md h2, .md h3, .md h4 {
+  margin: 0.9em 0 0.45em;
+  line-height: 1.35;
+  font-weight: 600;
+}
+.md h1 { font-size: 1.3em; }
+.md h2 { font-size: 1.18em; }
+.md h3 { font-size: 1.08em; }
+.md h4 { font-size: 1em; }
+
+.md ul, .md ol { margin: 0.45em 0; padding-left: 1.4em; }
+.md li { margin: 0.18em 0; }
+.md li > p { margin: 0.15em 0; }
+
+.md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88em;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0.12em 0.4em;
+  border-radius: 4px;
+}
+
+.md pre {
+  margin: 0.6em 0;
+  padding: 10px 12px;
+  background: #0b0d11;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-x: auto;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.md pre code {
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.md blockquote {
+  margin: 0.6em 0;
+  padding: 0.1em 0 0.1em 0.9em;
+  border-left: 3px solid var(--border);
+  color: var(--fg-muted);
+}
+
+.md hr { border: none; border-top: 1px solid var(--border); margin: 0.9em 0; }
+
+.md a { color: var(--accent); text-decoration: none; }
+.md a:hover { text-decoration: underline; }
+
+.md img { max-width: 100%; border-radius: 6px; }
+
+.md-table-wrap { overflow-x: auto; margin: 0.6em 0; }
+.md table { border-collapse: collapse; font-size: 12.5px; min-width: 50%; }
+.md th, .md td {
+  border: 1px solid var(--border);
+  padding: 5px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.md th { background: rgba(255, 255, 255, 0.05); font-weight: 600; }
+
+.md input[type='checkbox'] { margin-right: 6px; }
 
 .bubble-secondary {
   margin-top: 6px;

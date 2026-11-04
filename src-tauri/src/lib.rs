@@ -13,6 +13,7 @@ use tracing_subscriber::layer::SubscriberExt;
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             init_logging(app.handle().clone());
             let state = state::AppState::init(app.handle().clone());

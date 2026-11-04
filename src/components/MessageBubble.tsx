@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { Msg } from '../stores/chat';
+import Markdown from './Markdown';
 
 export default function MessageBubble({
   msg,
@@ -42,7 +43,7 @@ export default function MessageBubble({
         )}
         <div className="bubble-text">
           {primary.trim() ? (
-            primary
+            isUser ? primary : <Markdown>{primary}</Markdown>
           ) : msg.toolCalls.length === 0 ? (
             <span className="bubble-placeholder">（思考中…）</span>
           ) : null}
@@ -66,7 +67,9 @@ export default function MessageBubble({
           </button>
         )}
         {!isUser && showOriginal && (
-          <div className="bubble-secondary">{msg.original}</div>
+          <div className="bubble-secondary">
+            <Markdown>{msg.original}</Markdown>
+          </div>
         )}
         {msg.thinking && (
           <details className="thinking">
