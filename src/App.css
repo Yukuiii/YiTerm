@@ -201,6 +201,7 @@ html, body, #root {
 .bubble.ai { background: var(--bg-raised); border: 1px solid var(--border); }
 
 .bubble-text { white-space: pre-wrap; }
+.bubble-placeholder { color: var(--fg-muted); font-style: italic; }
 
 .bubble-secondary {
   margin-top: 6px;

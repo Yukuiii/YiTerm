@@ -27,7 +27,9 @@ export default function MessageBubble({
             ))}
           </div>
         )}
-        <div className="bubble-text">{primary}</div>
+        <div className="bubble-text">
+          {primary.trim() ? primary : <span className="bubble-placeholder">（思考中…）</span>}
+        </div>
         {msg.working && <div className="bubble-working">翻译中…</div>}
         {msg.error && (
           <div className="bubble-error">

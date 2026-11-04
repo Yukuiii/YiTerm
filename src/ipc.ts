@@ -86,6 +86,11 @@ export const conversationsCreate = (folder: string, title?: string) =>
 export const conversationsDelete = (id: string) =>
   invoke<void>('conversations_delete', { id });
 
+// ---------- diagnostics ----------
+
+export const debugLog = (message: string) =>
+  invoke<void>('debug_log', { message }).catch(() => {});
+
 // ---------- chat history persistence ----------
 
 export const chatSave = (convId: string, data: string) =>

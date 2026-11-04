@@ -239,6 +239,13 @@ pub fn conversations_delete(app: tauri::AppHandle, state: State<'_, AppState>, i
     Ok(())
 }
 
+/// Frontend diagnostic breadcrumbs → backend log (helps debug IPC/state issues
+/// without devtools attached to the webview).
+#[tauri::command]
+pub fn debug_log(message: String) {
+    tracing::info!(target: "yiterm_frontend", "{message}");
+}
+
 // ---------- chat history persistence (opaque JSON owned by the frontend) ----------
 
 fn chat_path(app: &tauri::AppHandle, state: &AppState, conv_id: &str) -> Result<std::path::PathBuf, String> {

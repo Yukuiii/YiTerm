@@ -92,6 +92,13 @@ pub fn spawn_follower(
             }
 
             if !upserts.is_empty() {
+                tracing::info!(
+                    conv = %conv_id,
+                    n = upserts.len(),
+                    keys = ?upserts.iter().map(|m| &m.key).collect::<Vec<_>>(),
+                    lenses = ?upserts.iter().map(|m| m.text.chars().count()).collect::<Vec<_>>(),
+                    "emit session-update"
+                );
                 let update = SessionUpdate {
                     conversation_id: conv_id.clone(),
                     session_id: session_id.clone(),

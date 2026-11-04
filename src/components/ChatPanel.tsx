@@ -47,6 +47,9 @@ export default function ChatPanel({ convId }: { convId: string }) {
       if (hasCJK(text)) {
         const key = store.addOptimistic(convId, text);
         const en = await store.translateOutbound(convId, key, text);
+        // Record before writing: the JSONL line can land within milliseconds
+        // of the write and reconcile relies on this text.
+        useChatStore.getState().markSent(convId, key, en);
         await terminalWrite(termId, en, true);
       } else {
         store.addPlain(convId, text);

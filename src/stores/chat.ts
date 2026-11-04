@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { chatLoad, chatSave, hasCJK, translate, type ChatMsg } from '../ipc';
+import { chatLoad, chatSave, debugLog, hasCJK, translate, type ChatMsg } from '../ipc';
 
 export interface Msg {
   key: string;
@@ -18,6 +18,12 @@ export interface Msg {
   /** original snapshot that the current translation was produced from */
   translatedFrom?: string;
   /**
+   * English text actually written into the terminal for this user bubble.
+   * The JSONL stores that text, so this is the deterministic reconcile key
+   * (translation may still be in flight when the line arrives).
+   */
+  sentText?: string;
+  /**
    * JSONL uuid this bubble was reconciled with. Must NOT replace `key`:
    * `key` is the stable local id that in-flight translation callbacks use.
    */
@@ -30,6 +36,7 @@ interface ChatStore {
   hydrate: (convId: string) => Promise<void>;
   addOptimistic: (convId: string, text: string) => string;
   addPlain: (convId: string, text: string) => void;
+  markSent: (convId: string, key: string, sentText: string) => void;
   upsertFromSession: (convId: string, msgs: ChatMsg[]) => void;
   appendDelta: (convId: string, key: string, delta: string) => void;
   setTranslation: (convId: string, key: string, full: string, fallbackOriginal?: string) => void;
@@ -118,8 +125,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       working: true, error: null, ts: null, thinking: null, tools: [],
     };
     set((s) => ({ byConv: { ...s.byConv, [convId]: [...(s.byConv[convId] ?? []), msg] } }));
+    void debugLog(`addOptimistic conv=${convId} key=${key} len=${text.length}`);
     return key;
   },
+
+  markSent: (convId, key, sentText) =>
+    set((s) => updateMsg(s.byConv, convId, key, (m) => ({ ...m, sentText }))),
 
   addPlain: (convId, text) => {
     const msg: Msg = {
@@ -130,6 +141,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   upsertFromSession: (convId, msgs) => {
+    void debugLog(
+      `upsert conv=${convId} n=${msgs.length} ` +
+        msgs.map((m) => `${m.role}:${m.key.slice(0, 12)}:len${m.text.length}:done${m.done ? 1 : 0}`).join(','),
+    );
     for (const m of msgs) {
       const list = get().byConv[convId] ?? [];
 
@@ -142,6 +157,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           (x) =>
             x.role === 'user' &&
             (x.sessionKey === m.key ||
+              x.sentText === trimmed ||
               x.translation === trimmed ||
               x.original.trim() === trimmed),
         );
@@ -220,6 +236,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const alt = list.find((m) => m.original === fallbackOriginal);
         if (alt) target = alt.key;
       }
+      void debugLog(
+        `setTranslation conv=${convId} key=${key.slice(0, 16)} target=${target.slice(0, 16)} ` +
+          `found=${list.some((m) => m.key === target) ? 1 : 0} outLen=${full.length}`,
+      );
       return updateMsg(s.byConv, convId, target, (m) => ({
         ...m, translation: full, working: false, error: null,
         translatedFrom: m.original,
