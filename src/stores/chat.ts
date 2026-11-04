@@ -222,13 +222,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         continue;
       }
 
-      // assistant: upsert by key
+      // assistant: upsert by key.
+      // A message id can arrive as several block-scoped lines (thinking / text /
+      // tool_use) — never let an empty-text line wipe text we already have.
       const existing = list.find((x) => x.key === m.key);
-      const textChanged = !existing || existing.original !== m.text;
+      const nextText = m.text !== '' ? m.text : (existing?.original ?? '');
+      const textChanged = existing ? nextText !== existing.original : m.text !== '';
       void debugLog(
         `asstIter key=${m.key.slice(0, 14)} existed=${existing ? 1 : 0} ` +
           `prevLen=${existing ? existing.original.length : -1} newLen=${m.text.length} ` +
-          `changed=${textChanged ? 1 : 0} think=${m.thinking ? 1 : 0}`,
+          `changed=${textChanged ? 1 : 0} think=${m.thinking ? 1 : 0} tools=${m.toolCalls.length}`,
       );
 
       if (!existing) {
@@ -242,7 +245,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       } else {
         set((s) => ({ byConv: updateMsg(s.byConv, convId, m.key, (prev) => ({
           ...prev,
-          original: m.text,
+          original: nextText,
           thinking: m.thinking ?? prev.thinking,
           toolCalls: mergeToolCalls(prev.toolCalls, m.toolCalls),
           ts: m.ts ?? prev.ts,
