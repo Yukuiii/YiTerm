@@ -286,5 +286,5 @@ pub async fn translate(
 ) -> Result<String, String> {
     let http = state.http.clone();
     let settings = state.settings.read().unwrap().clone();
-    translate::run(&http, &settings, direction, &text, &request_id, &channel).await
+    translate::run(&http, &settings.translation, direction, &text, &request_id, &channel).await
 }

@@ -6,6 +6,8 @@ use std::{
     },
 };
 
+use tauri::Manager;
+
 use crate::{sessions::Conversation, settings::Settings};
 
 /// Shared application state managed by Tauri.

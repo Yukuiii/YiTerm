@@ -7,6 +7,7 @@ mod translate;
 
 use std::sync::OnceLock;
 
+use tauri::Manager;
 use tracing_subscriber::layer::SubscriberExt;
 
 pub fn run() {

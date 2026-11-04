@@ -9,7 +9,7 @@ export interface Conversation {
   folder: string;
   sessionId: string;
   terminalId: number | null;
-  title: string | null;
+  title: string;
   createdAt: string;
 }
 

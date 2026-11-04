@@ -34,10 +34,13 @@ pub enum TranslateEvent {
 }
 
 /// True if the string contains Han / Hiragana / Katakana / Hangul.
+/// (The frontend does its own detection; kept for server-side use and tests.)
+#[allow(dead_code)]
 pub fn has_cjk(s: &str) -> bool {
     s.chars().any(is_cjk_char)
 }
 
+#[allow(dead_code)]
 pub fn is_cjk_char(c: char) -> bool {
     matches!(c,
         '\u{3040}'..='\u{309F}'   // Hiragana

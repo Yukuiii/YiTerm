@@ -157,7 +157,7 @@ fn html_unescape(s: &str) -> String {
                 "gt" => Some('>'),
                 "quot" => Some('"'),
                 "apos" | "#39" | "#x27" => Some('\''),
-                "nbsp" => Some('\u{a0}),
+                "nbsp" => Some('\u{a0}'),
                 _ => {
                     if let Some(num) = entity.strip_prefix('#').and_then(|n| {
                         n.parse::<u32>().ok().or_else(|| {

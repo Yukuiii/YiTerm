@@ -13,10 +13,10 @@ name = "yiterm_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2" }
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2" }
+tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 portable-pty = "0.9"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs"] }

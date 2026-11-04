@@ -156,7 +156,7 @@ pub struct Conversation {
     pub folder: String,
     pub session_id: String,
     pub terminal_id: Option<u64>,
-    pub title: Option<String>,
+    pub title: String,
     pub created_at: String,
 }
 

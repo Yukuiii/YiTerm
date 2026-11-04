@@ -7,7 +7,7 @@ use std::{
 };
 
 use base64::Engine;
-use portable_pty::{Child, CommandBuilder, Master, PtySize};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::ipc::Channel;
 
@@ -32,6 +32,7 @@ pub enum TerminalEvent {
     },
 }
 
+#[allow(dead_code)] // conv_id/folder/started_at_ms kept for diagnostics & future UI use
 pub struct TerminalHandle {
     pub id: u64,
     pub conv_id: String,
@@ -43,8 +44,8 @@ pub struct TerminalHandle {
     backlog: Mutex<Backlog>,
     subs: Mutex<Vec<Channel<TerminalEvent>>>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
-    master: Mutex<Option<Box<dyn Master + Send>>>,
-    child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
+    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
+    child: Mutex<Option<Box<dyn Child + Send>>>,
 }
 
 impl TerminalHandle {
@@ -76,9 +77,11 @@ impl TerminalHandle {
 
         let mut cmd = CommandBuilder::new(claude_path);
         if resume {
-            cmd.arg("--resume").arg(&session_id);
+            cmd.arg("--resume");
+            cmd.arg(&session_id);
         } else {
-            cmd.arg("--session-id").arg(&session_id);
+            cmd.arg("--session-id");
+            cmd.arg(&session_id);
         }
         cmd.cwd(&folder);
         cmd.env("TERM", "xterm-256color");
@@ -170,7 +173,7 @@ impl TerminalHandle {
         self.child
             .lock()
             .ok()
-            .and_then(|mut g| g.as_mut().map(|c| c.wait().ok().and_then(|s| s.exit_code())))
+            .and_then(|mut g| g.as_mut().map(|c| c.wait().ok().map(|s| s.exit_code() as i32)))
     }
 
     /// Replay the backlog into `channel` then subscribe it for live data.
@@ -182,9 +185,8 @@ impl TerminalHandle {
     pub fn attach(&self, seq: u64, channel: Channel<TerminalEvent>) {
         let mut subs = self.subs.lock().unwrap();
         let (reset, bytes) = {
-            let mut backlog = self.backlog.lock().unwrap();
-            let (reset, bytes) = backlog.replay_after(seq);
-            (reset, bytes)
+            let backlog = self.backlog.lock().unwrap();
+            backlog.replay_after(seq)
         };
         if !bytes.is_empty() {
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
