@@ -32,7 +32,7 @@ interface ChatStore {
   addPlain: (convId: string, text: string) => void;
   upsertFromSession: (convId: string, msgs: ChatMsg[]) => void;
   appendDelta: (convId: string, key: string, delta: string) => void;
-  setTranslation: (convId: string, key: string, full: string) => void;
+  setTranslation: (convId: string, key: string, full: string, fallbackOriginal?: string) => void;
   setError: (convId: string, key: string, message: string) => void;
   setWorking: (convId: string, key: string, working: boolean) => void;
   clearConv: (convId: string) => void;
@@ -210,11 +210,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       ...m, translation: (m.translation ?? '') + delta,
     }))),
 
-  setTranslation: (convId, key, full) =>
-    set((s) => updateMsg(s.byConv, convId, key, (m) => ({
-      ...m, translation: full, working: false, error: null,
-      translatedFrom: m.original,
-    }))),
+  setTranslation: (convId, key, full, fallbackOriginal) =>
+    set((s) => {
+      const list = s.byConv[convId] ?? [];
+      let target = key;
+      if (!list.some((m) => m.key === key) && fallbackOriginal !== undefined) {
+        // The bubble was re-keyed/replaced while the request was in flight —
+        // land the result on the message that still carries that source text.
+        const alt = list.find((m) => m.original === fallbackOriginal);
+        if (alt) target = alt.key;
+      }
+      return updateMsg(s.byConv, convId, target, (m) => ({
+        ...m, translation: full, working: false, error: null,
+        translatedFrom: m.original,
+      }));
+    }),
 
   setError: (convId, key, message) =>
     set((s) => updateMsg(s.byConv, convId, key, (m) => ({ ...m, error: message, working: false }))),
@@ -248,10 +258,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const final = await translate('en-zh', snapshot, (ev) => {
         if (ev.type === 'delta') get().appendDelta(convId, key, ev.text);
-        else if (ev.type === 'done') get().setTranslation(convId, key, ev.text);
+        else if (ev.type === 'done') get().setTranslation(convId, key, ev.text, snapshot);
         else if (ev.type === 'error') get().setError(convId, key, ev.message);
       });
-      get().setTranslation(convId, key, final);
+      get().setTranslation(convId, key, final, snapshot);
     } catch (e) {
       get().setError(convId, key, String(e));
     } finally {
@@ -267,10 +277,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   translateOutbound: async (convId, key, text) => {
     const final = await translate('zh-en', text, (ev) => {
       if (ev.type === 'delta') get().appendDelta(convId, key, ev.text);
-      else if (ev.type === 'done') get().setTranslation(convId, key, ev.text);
+      else if (ev.type === 'done') get().setTranslation(convId, key, ev.text, text);
       else if (ev.type === 'error') get().setError(convId, key, ev.message);
     });
-    get().setTranslation(convId, key, final);
+    get().setTranslation(convId, key, final, text);
     return final;
   },
 }));

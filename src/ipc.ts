@@ -110,20 +110,41 @@ export const apiKeySet = (key: string | null) => invoke<void>('api_key_set', { k
 /**
  * Runs one translation, streaming incremental deltas into the channel.
  * Resolves with the final full text (the Done payload).
+ *
+ * A watchdog rejects if no event arrives for `idleTimeoutMs`, so a hung
+ * network path can never leave the UI stuck on “翻译中…” forever.
  */
-export async function translate(
+export function translate(
   direction: Direction,
   text: string,
   onUpdate: (ev: TranslateEvent) => void,
+  idleTimeoutMs = 25_000,
 ): Promise<string> {
-  const channel = new Channel<TranslateEvent>();
-  channel.onmessage = onUpdate;
-  const requestId = crypto.randomUUID();
-  return invoke<string>('translate', {
-    requestId,
-    direction,
-    text,
-    channel,
+  return new Promise<string>((resolve, reject) => {
+    const channel = new Channel<TranslateEvent>();
+    let timer: number | undefined;
+    const arm = () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = window.setTimeout(
+        () => reject(new Error('翻译服务无响应（超时），请检查网络或翻译设置')),
+        idleTimeoutMs,
+      );
+    };
+    channel.onmessage = (ev) => {
+      arm();
+      onUpdate(ev);
+    };
+    arm();
+    const requestId = crypto.randomUUID();
+    invoke<string>('translate', { requestId, direction, text, channel })
+      .then((final) => {
+        if (timer !== undefined) window.clearTimeout(timer);
+        resolve(final);
+      })
+      .catch((e) => {
+        if (timer !== undefined) window.clearTimeout(timer);
+        reject(e);
+      });
   });
 }
 

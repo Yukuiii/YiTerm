@@ -100,6 +100,9 @@ impl TerminalHandle {
         ] {
             cmd.env_remove(var);
         }
+        // Belt and braces: even if another marker slips through, ask claude
+        // to persist the transcript — the chat panel depends on the JSONL.
+        cmd.env("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", "1");
 
         let command = format!(
             "claude {} {}",
