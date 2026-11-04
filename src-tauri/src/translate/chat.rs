@@ -1,0 +1,159 @@
+use eventsource_stream::Eventsource;
+use futures_util::StreamExt;
+use serde_json::{json, Value};
+use tauri::ipc::Channel;
+
+use super::{Direction, TranslateEvent};
+
+/// OpenAI-compatible chat translation with SSE streaming. Falls back to a
+/// single non-streamed JSON response when the server doesn't speak SSE.
+#[allow(clippy::too_many_arguments)]
+pub async fn translate(
+    http: &reqwest::Client,
+    base_url: &str,
+    model: &str,
+    api_key: Option<&str>,
+    direction: Direction,
+    text: &str,
+    request_id: &str,
+    channel: &Channel<TranslateEvent>,
+) -> Result<String, String> {
+    let url = normalize_chat_url(base_url)?;
+    let system = match direction {
+        Direction::ZhToEn => {
+            "You are a translation engine. Translate the user's text into English. \
+             Preserve markdown formatting and code blocks verbatim. \
+             Output ONLY the translation, with no explanations."
+        }
+        Direction::EnToZh => {
+            "You are a translation engine. Translate the user's text into Simplified \
+             Chinese (zh-CN). Preserve markdown formatting and code blocks verbatim. \
+             Output ONLY the translation, with no explanations."
+        }
+    };
+
+    let mut req = http
+        .post(&url)
+        .json(&json!({
+            "model": model,
+            "stream": true,
+            "messages": [
+                { "role": "system", "content": system },
+                { "role": "user", "content": text }
+            ]
+        }));
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("chat 请求失败: {e}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let body = body.chars().take(512).collect::<String>();
+        return Err(format!("chat HTTP {status}: {body}"));
+    }
+
+    let is_sse = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/event-stream"));
+
+    if is_sse {
+        let mut stream = resp.bytes_stream().eventsource();
+        let mut acc = String::new();
+        while let Some(event) = stream.next().await {
+            let event = event.map_err(|e| format!("SSE: {e}"))?;
+            if event.data.trim() == "[DONE]" {
+                break;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(&event.data) else {
+                continue;
+            };
+            if let Some(delta) = v
+                .pointer("/choices/0/delta/content")
+                .and_then(Value::as_str)
+            {
+                if delta.is_empty() {
+                    continue;
+                }
+                acc.push_str(delta);
+                let _ = channel.send(TranslateEvent::Delta {
+                    request_id: request_id.to_string(),
+                    text: delta.to_string(),
+                });
+            }
+        }
+        if acc.is_empty() {
+            return Err("chat 返回为空".into());
+        }
+        Ok(acc)
+    } else {
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("chat decode: {e}"))?;
+        let content = v
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .ok_or("chat 响应缺少 choices[0].message.content")?
+            .to_string();
+        if !content.is_empty() {
+            let _ = channel.send(TranslateEvent::Delta {
+                request_id: request_id.to_string(),
+                text: content.clone(),
+            });
+        }
+        Ok(content)
+    }
+}
+
+/// `https://api.example.com[/v1]` → `https://api.example.com/v1/chat/completions`;
+/// a full `.../chat/completions` URL is used as-is.
+pub fn normalize_chat_url(base: &str) -> Result<String, String> {
+    let mut url = base.trim().trim_end_matches('/').to_string();
+    if url.is_empty() {
+        return Err("Base URL 为空".into());
+    }
+    if url.ends_with("/chat/completions") {
+        return Ok(url);
+    }
+    if let Some(stripped) = url.strip_suffix("/v1") {
+        url = stripped.to_string();
+    }
+    Ok(format!("{url}/v1/chat/completions"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn url_normalization() {
+        assert_eq!(
+            normalize_chat_url("https://api.example.com").unwrap(),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_chat_url("https://api.example.com/").unwrap(),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_chat_url("https://api.example.com/v1").unwrap(),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_chat_url("https://api.example.com/v1/").unwrap(),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_chat_url("https://api.example.com/v1/chat/completions").unwrap(),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert!(normalize_chat_url("").is_err());
+    }
+}

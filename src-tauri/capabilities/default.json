@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "enables the default permissions plus dialog for folder picking",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:default"]
+}
