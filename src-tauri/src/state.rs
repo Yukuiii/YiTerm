@@ -86,8 +86,36 @@ fn macos_system_proxies() -> Option<Vec<reqwest::Proxy>> {
         .or_else(|_| std::process::Command::new("scutil").arg("--proxy").output())
         .ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
+    let parsed = parse_scutil_proxy(&text);
+
+    // SOCKS proxy would need reqwest's "socks" feature; HTTP/HTTPS proxies
+    // (Clash/Surge mixed ports serve both) are sufficient here.
+    let mut proxies = Vec::new();
+    if let Some(addr) = parsed.http {
+        if let Ok(p) = reqwest::Proxy::http(&addr) {
+            proxies.push(p);
+        }
+    }
+    if let Some(addr) = parsed.https {
+        if let Ok(p) = reqwest::Proxy::https(&addr) {
+            proxies.push(p);
+        }
+    }
+    (!proxies.is_empty()).then_some(proxies)
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct ScutilProxies {
+    http: Option<String>,
+    https: Option<String>,
+}
+
+/// Parses `scutil --proxy` output. Lines are indented, e.g.
+/// `  HTTPEnable : 1` / `  HTTPSProxy : 127.0.0.1` — matches must trim first.
+fn parse_scutil_proxy(text: &str) -> ScutilProxies {
     let get = |key: &str| -> Option<String> {
         text.lines()
+            .map(str::trim_start)
             .find(|l| l.starts_with(key))?
             .split(':')
             .nth(1)
@@ -95,23 +123,57 @@ fn macos_system_proxies() -> Option<Vec<reqwest::Proxy>> {
             .filter(|v| !v.is_empty())
     };
     let enabled = |key: &str| get(key).as_deref() == Some("1");
+    let addr = |en: &str, host_key: &str, port_key: &str| -> Option<String> {
+        if !enabled(en) {
+            return None;
+        }
+        let host = get(host_key)?;
+        let port = get(port_key)?;
+        Some(format!("http://{host}:{port}"))
+    };
+    ScutilProxies {
+        http: addr("HTTPEnable", "HTTPProxy", "HTTPPort"),
+        https: addr("HTTPSEnable", "HTTPSProxy", "HTTPSPort"),
+    }
+}
 
-    // SOCKS proxy would need reqwest's "socks" feature; HTTP/HTTPS proxies
-    // (Clash/Surge mixed ports serve both) are sufficient here.
-    let mut proxies = Vec::new();
-    if enabled("HTTPEnable") {
-        if let (Some(host), Some(port)) = (get("HTTPProxy"), get("HTTPPort")) {
-            if let Ok(p) = reqwest::Proxy::http(&format!("http://{host}:{port}")) {
-                proxies.push(p);
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Exact shape produced by `scutil --proxy` on macOS 26 (indented lines).
+    const SAMPLE: &str = r#"<dictionary> {
+  ExceptionsList : <array> {
+    0 : 127.0.0.1
+    1 : localhost
+  }
+  HTTPEnable : 1
+  HTTPPort : 7890
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 7890
+  HTTPSProxy : 127.0.0.1
+  ProxyAutoConfigEnable : 0
+}"#;
+
+    #[test]
+    fn parses_indented_scutil_output() {
+        let p = parse_scutil_proxy(SAMPLE);
+        assert_eq!(p.http.as_deref(), Some("http://127.0.0.1:7890"));
+        assert_eq!(p.https.as_deref(), Some("http://127.0.0.1:7890"));
     }
-    if enabled("HTTPSEnable") {
-        if let (Some(host), Some(port)) = (get("HTTPSProxy"), get("HTTPSPort")) {
-            if let Ok(p) = reqwest::Proxy::https(&format!("http://{host}:{port}")) {
-                proxies.push(p);
-            }
-        }
+
+    #[test]
+    fn disabled_proxies_yield_none() {
+        let text = "  HTTPEnable : 0\n  HTTPProxy : 127.0.0.1\n  HTTPPort : 7890\n";
+        let p = parse_scutil_proxy(text);
+        assert_eq!(p.http, None);
+        assert_eq!(p.https, None);
     }
-    (!proxies.is_empty()).then_some(proxies)
+
+    #[test]
+    fn missing_keys_yield_none() {
+        let p = parse_scutil_proxy("<dictionary> {\n  FTPPassive : 1\n}");
+        assert_eq!(p, ScutilProxies::default());
+    }
 }

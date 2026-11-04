@@ -28,6 +28,8 @@ pub fn run() {
             ipc::conversations_list,
             ipc::conversations_create,
             ipc::conversations_delete,
+            ipc::chat_save,
+            ipc::chat_load,
             ipc::settings_get,
             ipc::settings_set,
             ipc::api_key_get,

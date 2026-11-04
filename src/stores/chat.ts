@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { hasCJK, translate, type ChatMsg } from '../ipc';
+import { chatLoad, chatSave, hasCJK, translate, type ChatMsg } from '../ipc';
 
 export interface Msg {
   key: string;
@@ -21,6 +21,8 @@ export interface Msg {
 
 interface ChatStore {
   byConv: Record<string, Msg[]>;
+  /** Loads persisted history once per conversation (no-op if already in memory). */
+  hydrate: (convId: string) => Promise<void>;
   addOptimistic: (convId: string, text: string) => string;
   addPlain: (convId: string, text: string) => void;
   upsertFromSession: (convId: string, msgs: ChatMsg[]) => void;
@@ -38,6 +40,9 @@ interface ChatStore {
 // ---- module-level translation scheduling state ----
 const debounceTimers = new Map<string, number>(); // `${convId}:${key}` → timeout id
 const inflight = new Set<string>();
+const hydrated = new Set<string>();
+const lastSaved = new Map<string, string>();
+let saveTimer: number | undefined;
 const DEBOUNCE_MS = 1200;
 
 function schedule(convId: string, key: string, cb: () => void) {
@@ -72,6 +77,34 @@ function updateMsg(byConv: Record<string, Msg[]>, convId: string, key: string, f
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   byConv: {},
+
+  hydrate: async (convId) => {
+    if (hydrated.has(convId)) return;
+    hydrated.add(convId);
+    try {
+      const raw = await chatLoad(convId);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as Msg[];
+      if (!Array.isArray(saved)) return;
+      // Don't clobber anything that arrived while loading (session-updates can
+      // race a fresh start): merge by key, saved first.
+      set((s) => {
+        const live = s.byConv[convId] ?? [];
+        const liveKeys = new Set(live.map((m) => m.key));
+        const merged = [
+          ...saved.filter((m) => !liveKeys.has(m.key)).map((m) => ({
+            ...m,
+            // A crash mid-translation leaves working=true forever — settle it.
+            working: false,
+          })),
+          ...live,
+        ];
+        return { byConv: { ...s.byConv, [convId]: merged } };
+      });
+    } catch {
+      /* corrupt cache — start fresh */
+    }
+  },
 
   addOptimistic: (convId, text) => {
     const key = `local-${crypto.randomUUID()}`;
@@ -232,3 +265,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     return final;
   },
 }));
+
+// Debounced persistence: streaming deltas fire very often, so only write the
+// conversations whose serialized form actually changed, at most ~2x/second.
+useChatStore.subscribe((state, prev) => {
+  if (state.byConv === prev.byConv) return;
+  if (saveTimer !== undefined) window.clearTimeout(saveTimer);
+  saveTimer = window.setTimeout(() => {
+    for (const [convId, msgs] of Object.entries(useChatStore.getState().byConv)) {
+      const json = JSON.stringify(msgs);
+      if (lastSaved.get(convId) === json) continue;
+      lastSaved.set(convId, json);
+      void chatSave(convId, json).catch(() => {
+        lastSaved.delete(convId); // retry on next change
+      });
+    }
+  }, 500);
+});

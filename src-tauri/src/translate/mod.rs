@@ -138,13 +138,23 @@ pub async fn run(
 
     match result {
         Ok(full) => {
+            tracing::info!(
+                mode = %settings.mode,
+                direction = ?direction,
+                in_chars = text.chars().count(),
+                out_chars = full.chars().count(),
+                "translate ok"
+            );
             let _ = channel.send(TranslateEvent::Done {
                 request_id: request_id.to_string(),
                 text: full.clone(),
             });
             Ok(full)
         }
-        Err(e) => emit_error(e),
+        Err(e) => {
+            tracing::warn!(mode = %settings.mode, direction = ?direction, error = %e, "translate failed");
+            emit_error(e)
+        }
     }
 }
 

@@ -12,7 +12,17 @@ export default function ChatPanel({ convId }: { convId: string }) {
   const exited = useTerminalsStore((s) => (convId in s.exited ? s.exited[convId] : undefined));
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  const flashNotice = (text: string) => {
+    setNotice(text);
+    window.setTimeout(() => setNotice(null), 3000);
+  };
+
+  useEffect(() => {
+    void useChatStore.getState().hydrate(convId);
+  }, [convId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -22,7 +32,14 @@ export default function ChatPanel({ convId }: { convId: string }) {
     const text = input.trim();
     if (!text || sending) return;
     const termId = terminal?.terminalId;
-    if (termId === undefined || exited !== undefined) return;
+    if (exited !== undefined) {
+      flashNotice('终端已退出，无法发送');
+      return;
+    }
+    if (termId === undefined) {
+      flashNotice('终端正在启动，请稍候…');
+      return;
+    }
     setInput('');
     setSending(true);
     const store = useChatStore.getState();
@@ -92,6 +109,7 @@ export default function ChatPanel({ convId }: { convId: string }) {
         ))}
         <div ref={bottomRef} />
       </div>
+      {notice && <div className="composer-notice">{notice}</div>}
       <div className="composer">
         <textarea
           value={input}

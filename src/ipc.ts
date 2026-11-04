@@ -86,6 +86,14 @@ export const conversationsCreate = (folder: string, title?: string) =>
 export const conversationsDelete = (id: string) =>
   invoke<void>('conversations_delete', { id });
 
+// ---------- chat history persistence ----------
+
+export const chatSave = (convId: string, data: string) =>
+  invoke<void>('chat_save', { convId, data });
+
+export const chatLoad = (convId: string) =>
+  invoke<string | null>('chat_load', { convId });
+
 // ---------- settings ----------
 
 export const settingsGet = () => invoke<Settings>('settings_get');

@@ -239,6 +239,45 @@ pub fn conversations_delete(app: tauri::AppHandle, state: State<'_, AppState>, i
     Ok(())
 }
 
+// ---------- chat history persistence (opaque JSON owned by the frontend) ----------
+
+fn chat_path(app: &tauri::AppHandle, state: &AppState, conv_id: &str) -> Result<std::path::PathBuf, String> {
+    // conv ids are UUIDs we generate; reject anything path-ish defensively.
+    if !conv_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("invalid conversation id".into());
+    }
+    let dir = state.config_dir(app).join("chats");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join(format!("{conv_id}.json")))
+}
+
+#[tauri::command]
+pub fn chat_save(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    conv_id: String,
+    data: String,
+) -> Result<(), String> {
+    let path = chat_path(&app, &state, &conv_id)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn chat_load(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    conv_id: String,
+) -> Result<Option<String>, String> {
+    let path = chat_path(&app, &state, &conv_id)?;
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 fn now_iso() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
