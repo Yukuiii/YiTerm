@@ -3,7 +3,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tauri::ipc::Channel;
 
-use super::{Direction, TranslateEvent};
+use super::{protect_code, restore_code, safe_stream_prefix, Direction, TranslateEvent};
 
 /// OpenAI-compatible chat translation with SSE streaming. Falls back to a
 /// single non-streamed JSON response when the server doesn't speak SSE.
@@ -22,15 +22,20 @@ pub async fn translate(
     let system = match direction {
         Direction::ZhToEn => {
             "You are a translation engine. Translate the user's text into English. \
-             Preserve markdown formatting and code blocks verbatim. \
+             Preserve markdown formatting. Tokens of the form @@C0@@ are protected \
+             code; reproduce them exactly where they appear. \
              Output ONLY the translation, with no explanations."
         }
         Direction::EnToZh => {
             "You are a translation engine. Translate the user's text into Simplified \
-             Chinese (zh-CN). Preserve markdown formatting and code blocks verbatim. \
+             Chinese (zh-CN). Preserve markdown formatting. Tokens of the form @@C0@@ \
+             are protected code; reproduce them exactly where they appear. \
              Output ONLY the translation, with no explanations."
         }
     };
+
+    // Swap code blocks / inline code for sentinels so they survive verbatim.
+    let (protected, blocks) = protect_code(text);
 
     let mut req = http
         .post(&url)
@@ -41,7 +46,7 @@ pub async fn translate(
             "stream": true,
             "messages": [
                 { "role": "system", "content": system },
-                { "role": "user", "content": text }
+                { "role": "user", "content": protected }
             ]
         }));
     if let Some(key) = api_key {
@@ -68,6 +73,7 @@ pub async fn translate(
     if is_sse {
         let mut stream = resp.bytes_stream().eventsource();
         let mut acc = String::new();
+        let mut pending = String::new(); // may end inside a sentinel
         while let Some(event) = stream.next().await {
             let event = event.map_err(|e| format!("SSE: {e}"))?;
             if event.data.trim() == "[DONE]" {
@@ -84,16 +90,34 @@ pub async fn translate(
                     continue;
                 }
                 acc.push_str(delta);
+                pending.push_str(delta);
+                // Emit everything except a possibly-unfinished sentinel.
+                let safe = safe_stream_prefix(&pending);
+                if safe > 0 {
+                    let out = restore_code(&pending[..safe], &blocks);
+                    pending.drain(..safe);
+                    if !out.is_empty() {
+                        let _ = channel.send(TranslateEvent::Delta {
+                            request_id: request_id.to_string(),
+                            text: out,
+                        });
+                    }
+                }
+            }
+        }
+        if !pending.is_empty() {
+            let out = restore_code(&pending, &blocks);
+            if !out.is_empty() {
                 let _ = channel.send(TranslateEvent::Delta {
                     request_id: request_id.to_string(),
-                    text: delta.to_string(),
+                    text: out,
                 });
             }
         }
         if acc.is_empty() {
             return Err("chat 返回为空".into());
         }
-        Ok(acc)
+        Ok(restore_code(&acc, &blocks))
     } else {
         let v: Value = resp
             .json()
@@ -104,13 +128,14 @@ pub async fn translate(
             .and_then(Value::as_str)
             .ok_or("chat 响应缺少 choices[0].message.content")?
             .to_string();
-        if !content.is_empty() {
+        let full = restore_code(&content, &blocks);
+        if !full.is_empty() {
             let _ = channel.send(TranslateEvent::Delta {
                 request_id: request_id.to_string(),
-                text: content.clone(),
+                text: full.clone(),
             });
         }
-        Ok(content)
+        Ok(full)
     }
 }
 

@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use tauri::ipc::Channel;
 
-use super::{chunk, TranslateEvent};
+use super::{chunk, protect_code, restore_code, TranslateEvent};
 
 /// Chrome's built-in translate key (same one the proven proxy uses).
 const CHROME_KEY: &str = "AIzaSyATBXajvzQLTDHEQbcpq0Ihe0vWDHmO520";
@@ -24,31 +24,55 @@ pub async fn translate(
     request_id: &str,
     channel: &Channel<TranslateEvent>,
 ) -> Result<String, String> {
+    // Swap code blocks / inline code for sentinels so they survive verbatim.
+    let (protected, blocks) = protect_code(text);
     let mut acc = String::new();
-    for part in chunk(text, CHUNK_MAX) {
-        let out = match chrome_translate(http, &part, &target).await {
-            Ok(out) => out,
-            Err(first_err) => {
-                tracing::warn!(error = %first_err, "translateHtml failed, retrying once");
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                match chrome_translate(http, &part, &target).await {
-                    Ok(out) => out,
-                    Err(second_err) => gtx_translate(http, &part, &target)
-                        .await
-                        .map_err(|_| {
-                            format!(
-                                "Google 免费端点不可达（需要能访问 Google 的网络或代理；\
-                                 最近错误: {first_err} / {second_err}）。\
-                                 可在设置中切换 Chat 模式使用自定义翻译服务"
-                            )
-                        })?,
+
+    for part in chunk(&protected, CHUNK_MAX) {
+        // translateHtml collapses newlines and breaks markdown structure, while
+        // the translate_a endpoint preserves it — pick per chunk.
+        let structured = part.contains('\n') || part.contains("@@C");
+        let raw = if structured {
+            match gtx_translate(http, &part, target).await {
+                Ok(out) => out,
+                Err(gtx_err) => {
+                    tracing::warn!(error = %gtx_err, "gtx failed, falling back to translateHtml");
+                    chrome_translate(http, &part, target).await.map_err(|e| {
+                        format!(
+                            "Google 免费端点不可达（需要能访问 Google 的网络或代理；\
+                             最近错误: {gtx_err} / {e}）。\
+                             可在设置中切换 Chat 模式使用自定义翻译服务"
+                        )
+                    })?
+                }
+            }
+        } else {
+            match chrome_translate(http, &part, target).await {
+                Ok(out) => out,
+                Err(first_err) => {
+                    tracing::warn!(error = %first_err, "translateHtml failed, retrying once");
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    match chrome_translate(http, &part, target).await {
+                        Ok(out) => out,
+                        Err(second_err) => {
+                            gtx_translate(http, &part, target).await.map_err(|_| {
+                                format!(
+                                    "Google 免费端点不可达（需要能访问 Google 的网络或代理；\
+                                     最近错误: {first_err} / {second_err}）。\
+                                     可在设置中切换 Chat 模式使用自定义翻译服务"
+                                )
+                            })?
+                        }
+                    }
                 }
             }
         };
-        acc.push_str(&out);
+
+        let restored = restore_code(&raw, &blocks);
+        acc.push_str(&restored);
         let _ = channel.send(TranslateEvent::Delta {
             request_id: request_id.to_string(),
-            text: out,
+            text: restored,
         });
     }
     Ok(acc)

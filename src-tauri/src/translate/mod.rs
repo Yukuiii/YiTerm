@@ -78,6 +78,123 @@ pub fn chunk(text: &str, max: usize) -> Vec<String> {
     chunks
 }
 
+// ---------- code protection ----------
+//
+// Machine translation mangles code (identifiers, punctuation) and the
+// translateHtml endpoint flattens newlines. Before translating we swap every
+// fenced block and inline code span for a `@@C<n>@@` sentinel (Google passes
+// those through verbatim), then restore them in the output.
+
+/// Replaces fenced code blocks and inline code spans with sentinels.
+/// Returns the protected text plus the original spans (index = sentinel id).
+pub fn protect_code(input: &str) -> (String, Vec<String>) {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut out = String::with_capacity(input.len());
+    let mut in_fence = false;
+    let mut fence_buf = String::new();
+
+    for line in input.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            if !in_fence {
+                in_fence = true;
+                fence_buf.clear();
+                fence_buf.push_str(line);
+            } else {
+                fence_buf.push_str(line);
+                in_fence = false;
+                out.push_str(&format!("@@C{}@@\n", blocks.len()));
+                blocks.push(fence_buf.trim_end_matches('\n').to_string());
+                fence_buf.clear();
+            }
+            continue;
+        }
+        if in_fence {
+            fence_buf.push_str(line);
+        } else {
+            out.push_str(&protect_inline_code(line, &mut blocks));
+        }
+    }
+    if in_fence {
+        // Unterminated fence: keep verbatim rather than translate code as prose.
+        out.push_str(&fence_buf);
+    }
+    (out, blocks)
+}
+
+fn protect_inline_code(line: &str, blocks: &mut Vec<String>) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(start) = rest.find('`') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match after.find('`') {
+            Some(end) => {
+                let span = &rest[start..start + 1 + end + 1];
+                out.push_str(&format!("@@C{}@@", blocks.len()));
+                blocks.push(span.to_string());
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(rest);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Restores sentinels in a translated fragment.
+pub fn restore_code(translated: &str, blocks: &[String]) -> String {
+    let mut out = translated.to_string();
+    for (i, block) in blocks.iter().enumerate() {
+        out = out.replace(&format!("@@C{i}@@"), block);
+    }
+    out
+}
+
+/// Position up to which `s` can be flushed during streaming without risking a
+/// split sentinel (a `@@C<digits>@@` token that may still complete next delta).
+pub fn safe_stream_prefix(s: &str) -> usize {
+    if let Some(rel) = s.rfind("@@") {
+        let tail = &s[rel..];
+        if tail == "@@" {
+            // Either a complete sentinel's closing pair, or a fresh opening.
+            let before = &s[..rel];
+            if let Some(rel2) = before.rfind("@@C") {
+                let mid = &before[rel2 + 3..];
+                let digits = mid.bytes().take_while(u8::is_ascii_digit).count();
+                if digits > 0 && digits == mid.len() {
+                    return s.len(); // complete "@@C<n>@@" — flush everything
+                }
+            }
+            return rel; // opening "@@" — hold
+        }
+        if let Some(rest) = tail.strip_prefix("@@C") {
+            if rest.is_empty() {
+                return rel; // "@@C" — may still grow
+            }
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            if digits == 0 {
+                return s.len(); // "@@C" + non-digit → literal text
+            }
+            let after_digits = &rest[digits..];
+            if after_digits.is_empty() {
+                return rel; // "@@C123" — closing may come next
+            }
+            if after_digits.starts_with("@@") {
+                return s.len(); // complete sentinel
+            }
+            return rel; // malformed — hold to be safe
+        }
+    }
+    if s.ends_with('@') {
+        return s.len() - 1;
+    }
+    s.len()
+}
+
 /// Dispatches one translation request to the configured provider, streaming
 /// events into `channel` and returning the final full text.
 pub async fn run(
@@ -198,5 +315,52 @@ mod tests {
     fn chunk_small_and_empty() {
         assert_eq!(chunk("hi", 800), vec!["hi".to_string()]);
         assert_eq!(chunk("", 800), vec![String::new()]);
+    }
+
+    #[test]
+    fn protects_fenced_and_inline_code() {
+        let input = "## 标题\n\n使用 `npm run build`：\n\n```js\nconst x = 1;\n```\n\n完成。";
+        let (protected, blocks) = protect_code(input);
+        assert!(!protected.contains("const x"));
+        assert!(!protected.contains("npm run build"));
+        assert!(protected.contains("@@C0@@"));
+        assert!(protected.contains("@@C1@@"));
+        assert_eq!(blocks.len(), 2); // inline first, then fence (scan order)
+        assert!(blocks.iter().any(|b| b.contains("npm run build")));
+        assert!(blocks.iter().any(|b| b.contains("const x = 1;")));
+        assert!(protected.contains("## 标题"));
+
+        let restored = restore_code(&restored_probe(&protected), &blocks);
+        assert!(restored.contains("const x = 1;"));
+        assert!(restored.contains("`npm run build`"));
+    }
+
+    fn restored_probe(s: &str) -> String {
+        // pretend the translator returned the protected text unchanged
+        s.to_string()
+    }
+
+    #[test]
+    fn unterminated_fence_kept_verbatim() {
+        let input = "before\n```js\nconst a = 1;";
+        let (protected, blocks) = protect_code(input);
+        assert!(protected.contains("const a = 1;"));
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn stream_prefix_holds_partial_sentinels() {
+        // Nothing pending → flush all.
+        assert_eq!(safe_stream_prefix("hello"), 5);
+        // Opening characters are held back.
+        assert_eq!(safe_stream_prefix("hi @@"), 3);
+        assert_eq!(safe_stream_prefix("hi @@C"), 3);
+        assert_eq!(safe_stream_prefix("hi @@C12"), 3);
+        assert_eq!(safe_stream_prefix("hi @@C12@"), 3);
+        // Complete sentinel flushes through.
+        assert_eq!(safe_stream_prefix("hi @@C12@@"), 10);
+        assert_eq!(safe_stream_prefix("hi @@C12@@ tail"), 15);
+        // Lone trailing '@' is held.
+        assert_eq!(safe_stream_prefix("hi @"), 3);
     }
 }
