@@ -86,6 +86,20 @@ impl TerminalHandle {
         cmd.cwd(&folder);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // If YiTerm itself was launched from a Claude Code session (dev
+        // workflows, terminal multiplexers), the child would inherit the
+        // parent's session markers — most notably CLAUDE_CODE_CHILD_SESSION,
+        // which disables transcript saving and silently breaks the JSONL
+        // follower. Strip per-session markers; keep auth/provider vars.
+        for var in [
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_PID",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "CLAUDE_CODE_MESSAGING_TOKEN",
+        ] {
+            cmd.env_remove(var);
+        }
 
         let command = format!(
             "claude {} {}",

@@ -17,6 +17,11 @@ export interface Msg {
   fromTerminal?: boolean;
   /** original snapshot that the current translation was produced from */
   translatedFrom?: string;
+  /**
+   * JSONL uuid this bubble was reconciled with. Must NOT replace `key`:
+   * `key` is the stable local id that in-flight translation callbacks use.
+   */
+  sessionKey?: string;
 }
 
 interface ChatStore {
@@ -129,16 +134,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const list = get().byConv[convId] ?? [];
 
       if (m.role === 'user') {
-        // Reconcile with the optimistic bubble (match by en translation or original).
+        // Reconcile with the optimistic bubble (already-known session key,
+        // or matching en translation / original text). Keep `key` stable —
+        // an in-flight outbound translation still addresses this bubble by it.
         const trimmed = m.text.trim();
         const match = list.find(
           (x) =>
             x.role === 'user' &&
-            (x.translation === trimmed || x.original.trim() === trimmed),
+            (x.sessionKey === m.key ||
+              x.translation === trimmed ||
+              x.original.trim() === trimmed),
         );
         if (match) {
           set((s) => updateMsg(s.byConv, convId, match.key, (prev) => ({
-            ...prev, key: m.key, ts: m.ts, working: false, error: null,
+            ...prev, sessionKey: m.key, ts: prev.ts ?? m.ts,
           })));
           continue;
         }
@@ -150,7 +159,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             [convId]: [...list, {
               key: m.key, role: 'user', original: m.text, translation: null,
               working: false, error: null, ts: m.ts, thinking: null, tools: [],
-              fromTerminal: true,
+              fromTerminal: true, sessionKey: m.key,
             } satisfies Msg],
           },
         }));
