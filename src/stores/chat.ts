@@ -130,7 +130,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   markSent: (convId, key, sentText) =>
-    set((s) => updateMsg(s.byConv, convId, key, (m) => ({ ...m, sentText }))),
+    set((s) => ({ byConv: updateMsg(s.byConv, convId, key, (m) => ({ ...m, sentText })) })),
 
   addPlain: (convId, text) => {
     const msg: Msg = {
@@ -162,9 +162,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               x.original.trim() === trimmed),
         );
         if (match) {
-          set((s) => updateMsg(s.byConv, convId, match.key, (prev) => ({
+          set((s) => ({ byConv: updateMsg(s.byConv, convId, match.key, (prev) => ({
             ...prev, sessionKey: m.key, ts: prev.ts ?? m.ts,
-          })));
+          })) }));
           continue;
         }
         if (list.some((x) => x.key === m.key)) continue; // already known
@@ -172,7 +172,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         set((s) => ({
           byConv: {
             ...s.byConv,
-            [convId]: [...list, {
+            [convId]: [...(s.byConv[convId] ?? []), {
               key: m.key, role: 'user', original: m.text, translation: null,
               working: false, error: null, ts: m.ts, thinking: null, tools: [],
               fromTerminal: true, sessionKey: m.key,
@@ -185,6 +185,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // assistant: upsert by key
       const existing = list.find((x) => x.key === m.key);
       const textChanged = !existing || existing.original !== m.text;
+      void debugLog(
+        `asstIter key=${m.key.slice(0, 14)} existed=${existing ? 1 : 0} ` +
+          `prevLen=${existing ? existing.original.length : -1} newLen=${m.text.length} ` +
+          `changed=${textChanged ? 1 : 0} think=${m.thinking ? 1 : 0}`,
+      );
 
       if (!existing) {
         const msg: Msg = {
@@ -194,13 +199,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         };
         set((s) => ({ byConv: { ...s.byConv, [convId]: [...(s.byConv[convId] ?? []), msg] } }));
       } else {
-        set((s) => updateMsg(s.byConv, convId, m.key, (prev) => ({
+        set((s) => ({ byConv: updateMsg(s.byConv, convId, m.key, (prev) => ({
           ...prev,
           original: m.text,
           thinking: m.thinking ?? prev.thinking,
           tools: m.tools.length > 0 ? m.tools : prev.tools,
           ts: m.ts ?? prev.ts,
-        })));
+        })) }));
       }
 
       // Schedule translation: immediate when done / already-stale, debounced
@@ -231,9 +236,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   appendDelta: (convId, key, delta) =>
-    set((s) => updateMsg(s.byConv, convId, key, (m) => ({
+    set((s) => ({ byConv: updateMsg(s.byConv, convId, key, (m) => ({
       ...m, translation: (m.translation ?? '') + delta,
-    }))),
+    })) })),
 
   setTranslation: (convId, key, full, fallbackOriginal) =>
     set((s) => {
@@ -249,17 +254,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         `setTranslation conv=${convId} key=${key.slice(0, 16)} target=${target.slice(0, 16)} ` +
           `found=${list.some((m) => m.key === target) ? 1 : 0} outLen=${full.length}`,
       );
-      return updateMsg(s.byConv, convId, target, (m) => ({
-        ...m, translation: full, working: false, error: null,
-        translatedFrom: m.original,
-      }));
+      return {
+        byConv: updateMsg(s.byConv, convId, target, (m) => ({
+          ...m, translation: full, working: false, error: null,
+          translatedFrom: m.original,
+        })),
+      };
     }),
 
   setError: (convId, key, message) =>
-    set((s) => updateMsg(s.byConv, convId, key, (m) => ({ ...m, error: message, working: false }))),
+    set((s) => ({ byConv: updateMsg(s.byConv, convId, key, (m) => ({ ...m, error: message, working: false })) })),
 
   setWorking: (convId, key, working) =>
-    set((s) => updateMsg(s.byConv, convId, key, (m) => ({ ...m, working }))),
+    set((s) => ({ byConv: updateMsg(s.byConv, convId, key, (m) => ({ ...m, working })) })),
 
   clearConv: (convId) =>
     set((s) => {
@@ -275,9 +282,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (!m || !m.original.trim()) return;
     // Already Chinese (or contains CJK) → show as-is, skip translation.
     if (m.role === 'assistant' && hasCJK(m.original) && !/[a-zA-Z]{8,}/.test(m.original)) {
-      set((s) => updateMsg(s.byConv, convId, key, (prev) => ({
+      set((s) => ({ byConv: updateMsg(s.byConv, convId, key, (prev) => ({
         ...prev, translation: prev.original, translatedFrom: prev.original, working: false,
-      })));
+      })) }));
       return;
     }
 
