@@ -34,20 +34,22 @@ pub async fn terminal_start(
     state: State<'_, AppState>,
     req: TerminalStartRequest,
 ) -> Result<TerminalStartInfo, String> {
-    // Existing live terminal for this conversation? Return it.
-    if let Some(conv) = state.convs.read().unwrap().get(&req.conversation_id).cloned() {
-        if let Some(tid) = conv.terminal_id {
-            if let Some(t) = state.terms.read().unwrap().get(&tid) {
-                if !*t.exited.lock().unwrap() {
-                    return Ok(TerminalStartInfo {
-                        conversation_id: conv.id,
-                        terminal_id: t.id,
-                        session_id: t.session_id.clone(),
-                        command: t.command.clone(),
-                        resumed: true,
-                    });
-                }
-            }
+    // Existing live terminal bound to this conversation? Return it.
+    // Scanning `terms` (not just conv.terminal_id) also self-heals stale
+    // links and guards against concurrent duplicate starts.
+    {
+        let terms = state.terms.read().unwrap();
+        let alive = terms.values().find(|t| {
+            t.conv_id == req.conversation_id && !*t.exited.lock().unwrap()
+        });
+        if let Some(t) = alive {
+            return Ok(TerminalStartInfo {
+                conversation_id: t.conv_id.clone(),
+                terminal_id: t.id,
+                session_id: t.session_id.clone(),
+                command: t.command.clone(),
+                resumed: true,
+            });
         }
     }
 

@@ -207,6 +207,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const final = await translate('en-zh', snapshot, (ev) => {
         if (ev.type === 'delta') get().appendDelta(convId, key, ev.text);
         else if (ev.type === 'done') get().setTranslation(convId, key, ev.text);
+        else if (ev.type === 'error') get().setError(convId, key, ev.message);
       });
       get().setTranslation(convId, key, final);
     } catch (e) {
@@ -225,6 +226,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const final = await translate('zh-en', text, (ev) => {
       if (ev.type === 'delta') get().appendDelta(convId, key, ev.text);
       else if (ev.type === 'done') get().setTranslation(convId, key, ev.text);
+      else if (ev.type === 'error') get().setError(convId, key, ev.message);
     });
     get().setTranslation(convId, key, final);
     return final;

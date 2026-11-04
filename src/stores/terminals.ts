@@ -16,6 +16,11 @@ interface TerminalsStore {
   drop: (convId: string) => void;
 }
 
+// In-flight dedup: React StrictMode double-invokes effects in dev, and two
+// concurrent terminal_start calls would race past each other on the backend
+// and spawn duplicate PTYs. One promise per conversation.
+const starting = new Map<string, Promise<TerminalStartInfo>>();
+
 export const useTerminalsStore = create<TerminalsStore>((set, get) => ({
   byConv: {},
   exited: {},
@@ -31,7 +36,12 @@ export const useTerminalsStore = create<TerminalsStore>((set, get) => ({
         resumed: true,
       };
     }
-    const info = await terminalStart(convId);
+    const pending = starting.get(convId);
+    if (pending) return pending;
+    const promise = terminalStart(convId)
+      .finally(() => starting.delete(convId));
+    starting.set(convId, promise);
+    const info = await promise;
     set((s) => {
       const exited = { ...s.exited };
       delete exited[convId];

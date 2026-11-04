@@ -8,6 +8,10 @@ const CHROME_KEY: &str = "AIzaSyATBXajvzQLTDHEQbcpq0Ihe0vWDHmO520";
 const TRANSLATE_HTML_URL: &str = "https://translate-pa.googleapis.com/v1/translateHtml";
 const GTX_URL: &str = "https://translate.googleapis.com/translate_a/single";
 const CHUNK_MAX: usize = 800;
+/// Per-request timeout: free endpoints behind a proxy answer in ~2 s; without
+/// connectivity the connection blackholes, so fail fast and fall through
+/// instead of burning the full client timeout three times in a row.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/153 Safari/537.36";
 
 /// Chunked Google translation; per chunk: primary endpoint, retry once on
@@ -26,12 +30,18 @@ pub async fn translate(
             Ok(out) => out,
             Err(first_err) => {
                 tracing::warn!(error = %first_err, "translateHtml failed, retrying once");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 match chrome_translate(http, &part, &target).await {
                     Ok(out) => out,
-                    Err(_) => gtx_translate(http, &part, &target)
+                    Err(second_err) => gtx_translate(http, &part, &target)
                         .await
-                        .map_err(|e| format!("Google 翻译失败: {e}"))?,
+                        .map_err(|_| {
+                            format!(
+                                "Google 免费端点不可达（需要能访问 Google 的网络或代理；\
+                                 最近错误: {first_err} / {second_err}）。\
+                                 可在设置中切换 Chat 模式使用自定义翻译服务"
+                            )
+                        })?,
                 }
             }
         };
@@ -52,6 +62,7 @@ async fn chrome_translate(
     let payload = json!([[text, "auto", target], "te_lib"]);
     let resp = http
         .post(TRANSLATE_HTML_URL)
+        .timeout(REQUEST_TIMEOUT)
         .header("Content-Type", "application/json+protobuf")
         .header("x-goog-api-key", CHROME_KEY)
         .header("referer", "https://google.com/")
@@ -100,6 +111,7 @@ async fn gtx_translate(
 ) -> Result<String, String> {
     let resp = http
         .get(GTX_URL)
+        .timeout(REQUEST_TIMEOUT)
         .query(&[
             ("client", "at"),
             ("sl", "auto"),

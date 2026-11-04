@@ -34,6 +34,8 @@ pub async fn translate(
 
     let mut req = http
         .post(&url)
+        // Total cap for the streamed translation (covers SSE body reads).
+        .timeout(std::time::Duration::from_secs(90))
         .json(&json!({
             "model": model,
             "stream": true,
