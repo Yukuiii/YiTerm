@@ -1,5 +1,23 @@
 import { create } from 'zustand';
-import { chatLoad, chatSave, debugLog, hasCJK, translate, type ChatMsg } from '../ipc';
+import { chatLoad, chatSave, debugLog, hasCJK, translate, type ChatMsg, type ToolCall } from '../ipc';
+
+export interface ToolCallItem extends ToolCall {
+  /** Output text once the tool_result line arrives. */
+  result?: string;
+  isError?: boolean;
+}
+
+function mergeToolCalls(prev: ToolCallItem[], incoming: ToolCall[]): ToolCallItem[] {
+  const byId = new Map(prev.map((t) => [t.id, t]));
+  const merged: ToolCallItem[] = incoming.map((t) => {
+    const old = byId.get(t.id);
+    return old ? { ...t, result: old.result, isError: old.isError } : { ...t };
+  });
+  for (const t of prev) {
+    if (!merged.some((x) => x.id === t.id)) merged.push(t);
+  }
+  return merged;
+}
 
 export interface Msg {
   key: string;
@@ -12,7 +30,7 @@ export interface Msg {
   error: string | null;
   ts: string | null;
   thinking: string | null;
-  tools: string[];
+  toolCalls: ToolCallItem[];
   /** true = 用户直接在终端敲的输入（不参与发送翻译流） */
   fromTerminal?: boolean;
   /** original snapshot that the current translation was produced from */
@@ -108,6 +126,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             ...m,
             // A crash mid-translation leaves working=true forever — settle it.
             working: false,
+            // Older caches predate tool capture.
+            toolCalls: m.toolCalls ?? [],
           })),
           ...live,
         ];
@@ -122,7 +142,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const key = `local-${crypto.randomUUID()}`;
     const msg: Msg = {
       key, role: 'user', original: text, translation: null,
-      working: true, error: null, ts: null, thinking: null, tools: [],
+      working: true, error: null, ts: null, thinking: null, toolCalls: [],
     };
     set((s) => ({ byConv: { ...s.byConv, [convId]: [...(s.byConv[convId] ?? []), msg] } }));
     void debugLog(`addOptimistic conv=${convId} key=${key} len=${text.length}`);
@@ -135,7 +155,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   addPlain: (convId, text) => {
     const msg: Msg = {
       key: `local-${crypto.randomUUID()}`, role: 'user', original: text, translation: null,
-      working: false, error: null, ts: null, thinking: null, tools: [], fromTerminal: true,
+      working: false, error: null, ts: null, thinking: null, toolCalls: [], fromTerminal: true,
     };
     set((s) => ({ byConv: { ...s.byConv, [convId]: [...(s.byConv[convId] ?? []), msg] } }));
   },
@@ -147,6 +167,26 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     );
     for (const m of msgs) {
       const list = get().byConv[convId] ?? [];
+
+      // Tool output: attach to the assistant message holding that call id.
+      if (m.toolResult) {
+        const tr = m.toolResult;
+        set((s) => {
+          const cur = s.byConv[convId] ?? [];
+          let hit = false;
+          const next = cur.map((msg) => {
+            if (msg.toolCalls.length === 0) return msg;
+            const idx = msg.toolCalls.findIndex((t) => t.id === tr.callId);
+            if (idx === -1) return msg;
+            hit = true;
+            const calls = [...msg.toolCalls];
+            calls[idx] = { ...calls[idx], result: tr.text, isError: tr.isError };
+            return { ...msg, toolCalls: calls };
+          });
+          return hit ? { byConv: { ...s.byConv, [convId]: next } } : {};
+        });
+        continue;
+      }
 
       if (m.role === 'user') {
         // Reconcile with the optimistic bubble (already-known session key,
@@ -174,7 +214,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             ...s.byConv,
             [convId]: [...(s.byConv[convId] ?? []), {
               key: m.key, role: 'user', original: m.text, translation: null,
-              working: false, error: null, ts: m.ts, thinking: null, tools: [],
+              working: false, error: null, ts: m.ts, thinking: null, toolCalls: [],
               fromTerminal: true, sessionKey: m.key,
             } satisfies Msg],
           },
@@ -194,7 +234,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (!existing) {
         const msg: Msg = {
           key: m.key, role: 'assistant', original: m.text, translation: null,
-          working: false, error: null, ts: m.ts, thinking: m.thinking, tools: m.tools,
+          working: false, error: null, ts: m.ts, thinking: m.thinking,
+          toolCalls: mergeToolCalls([], m.toolCalls),
           translatedFrom: undefined,
         };
         set((s) => ({ byConv: { ...s.byConv, [convId]: [...(s.byConv[convId] ?? []), msg] } }));
@@ -203,7 +244,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           ...prev,
           original: m.text,
           thinking: m.thinking ?? prev.thinking,
-          tools: m.tools.length > 0 ? m.tools : prev.tools,
+          toolCalls: mergeToolCalls(prev.toolCalls, m.toolCalls),
           ts: m.ts ?? prev.ts,
         })) }));
       }

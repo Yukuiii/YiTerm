@@ -79,7 +79,7 @@ pub fn spawn_follower(
                     tracing::debug!(?path, "unparseable jsonl line skipped");
                     continue;
                 };
-                if let Some(msg) = parse_line(&v) {
+                for msg in parse_line(&v) {
                     let fingerprint = serde_json::to_string(&msg).unwrap_or_default();
                     match emitted.get(&msg.key) {
                         Some(prev) if *prev == fingerprint => {}

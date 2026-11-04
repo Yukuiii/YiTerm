@@ -27,12 +27,25 @@ export interface Settings {
 
 export type Direction = 'zh-en' | 'en-zh';
 
+export interface ToolCall {
+  id: string;
+  name: string;
+  detail: string;
+}
+
+export interface ToolResult {
+  callId: string;
+  isError: boolean;
+  text: string;
+}
+
 export interface ChatMsg {
   key: string;
   role: 'user' | 'assistant';
   text: string;
   thinking: string | null;
-  tools: string[];
+  toolCalls: ToolCall[];
+  toolResult: ToolResult | null;
   ts: string | null;
   done: boolean;
 }

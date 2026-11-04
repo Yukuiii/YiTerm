@@ -20,15 +20,32 @@ export default function MessageBubble({
   return (
     <div className={`bubble-row ${isUser ? 'from-user' : 'from-ai'}`}>
       <div className={`bubble ${isUser ? 'user' : 'ai'}`}>
-        {msg.tools.length > 0 && (
-          <div className="tool-chips">
-            {dedupeTools(msg.tools).map((t) => (
-              <span key={t} className="chip">{t}</span>
+        {msg.toolCalls.length > 0 && (
+          <div className="tool-list">
+            {msg.toolCalls.map((t) => (
+              <details key={t.id} className={`tool-item ${t.isError ? 'is-error' : ''}`}>
+                <summary>
+                  <span className="chip">{t.name}</span>
+                  <span className="tool-detail" title={t.detail}>{t.detail || '—'}</span>
+                  {t.result !== undefined && (
+                    <span className="tool-status">{t.isError ? '失败' : '✓'}</span>
+                  )}
+                </summary>
+                {t.result !== undefined ? (
+                  <pre className="tool-output">{t.result || '（无输出）'}</pre>
+                ) : (
+                  <div className="tool-pending">等待输出…</div>
+                )}
+              </details>
             ))}
           </div>
         )}
         <div className="bubble-text">
-          {primary.trim() ? primary : <span className="bubble-placeholder">（思考中…）</span>}
+          {primary.trim() ? (
+            primary
+          ) : msg.toolCalls.length === 0 ? (
+            <span className="bubble-placeholder">（思考中…）</span>
+          ) : null}
         </div>
         {msg.working && <div className="bubble-working">翻译中…</div>}
         {msg.error && (
@@ -60,10 +77,4 @@ export default function MessageBubble({
       </div>
     </div>
   );
-}
-
-function dedupeTools(tools: string[]): string[] {
-  const counts = new Map<string, number>();
-  for (const t of tools) counts.set(t, (counts.get(t) ?? 0) + 1);
-  return [...counts.entries()].map(([t, n]) => (n > 1 ? `${t} ×${n}` : t));
 }

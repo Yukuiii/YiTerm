@@ -228,7 +228,74 @@ html, body, #root {
 }
 .err-actions button:hover { border-color: var(--accent); color: var(--accent); }
 
-.tool-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+.tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.tool-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  overflow: hidden;
+}
+.tool-item.is-error { border-color: rgba(255, 107, 107, 0.45); }
+
+.tool-item summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+}
+.tool-item summary::-webkit-details-marker { display: none; }
+.tool-item summary::before {
+  content: '▸';
+  color: var(--fg-muted);
+  font-size: 10px;
+  flex: none;
+}
+.tool-item[open] summary::before { content: '▾'; }
+
+.tool-detail {
+  color: var(--fg-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+.tool-status { flex: none; font-size: 10.5px; color: var(--ok); }
+.tool-item.is-error .tool-status { color: var(--danger); }
+
+.tool-output {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 260px;
+  overflow-y: auto;
+  background: #0b0d11;
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.tool-item.is-error .tool-output { color: #ffb3b3; }
+
+.tool-pending {
+  padding: 6px 10px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  border-top: 1px solid var(--border);
+}
+
 .chip {
   font-size: 10.5px;
   padding: 1px 7px;
@@ -236,6 +303,7 @@ html, body, #root {
   background: rgba(76, 195, 138, 0.12);
   color: var(--ok);
   border: 1px solid rgba(76, 195, 138, 0.3);
+  flex: none;
 }
 
 .toggle-original {

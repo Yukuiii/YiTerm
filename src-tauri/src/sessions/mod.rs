@@ -28,9 +28,29 @@ pub enum Role {
     Assistant,
 }
 
+/// One tool invocation from an assistant `tool_use` block.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    /// Short human summary of the input (command, path, pattern, …).
+    pub detail: String,
+}
+
+/// A `tool_result` block from a user line, attached to its call by id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResult {
+    pub call_id: String,
+    pub is_error: bool,
+    pub text: String,
+}
+
 /// A chat message extracted from a session JSONL line. `key` is stable:
 /// user lines use the line `uuid`, assistant lines use `message.id` because
-/// claude writes 1–3 snapshot lines per message id while streaming.
+/// claude writes 1–3 snapshot lines per message id while streaming,
+/// tool results use `tr-<tool_use_id>`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMsg {
@@ -38,9 +58,80 @@ pub struct ChatMsg {
     pub role: Role,
     pub text: String,
     pub thinking: Option<String>,
-    pub tools: Vec<String>,
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCall>,
+    #[serde(default)]
+    pub tool_result: Option<ToolResult>,
     pub ts: Option<String>,
     pub done: bool,
+}
+
+const TOOL_DETAIL_MAX: usize = 200;
+const TOOL_RESULT_MAX: usize = 4000;
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push_str("\n…（输出已截断）");
+    out
+}
+
+/// Compact one-line summary of a tool_use `input` object.
+fn summarize_tool_input(input: Option<&Value>) -> String {
+    let Some(input) = input else {
+        return String::new();
+    };
+    if let Some(obj) = input.as_object() {
+        for key in [
+            "command",
+            "file_path",
+            "path",
+            "pattern",
+            "url",
+            "query",
+            "description",
+            "prompt",
+        ] {
+            if let Some(v) = obj.get(key).and_then(Value::as_str) {
+                let v = v.trim();
+                if !v.is_empty() {
+                    let one_line = v.replace('\n', " ⏎ ");
+                    return truncate_chars(&one_line, TOOL_DETAIL_MAX);
+                }
+            }
+        }
+        // Fall back to a compact JSON dump of the whole input.
+        let compact = input.to_string().replace('\n', " ");
+        return truncate_chars(&compact, TOOL_DETAIL_MAX);
+    }
+    truncate_chars(&input.to_string().replace('\n', " "), TOOL_DETAIL_MAX)
+}
+
+/// tool_result content is either a plain string or an array of text blocks.
+fn extract_result_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(items)) => {
+            let mut out = String::new();
+            for item in items {
+                if let Some(t) = item.get("text").and_then(Value::as_str) {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(t);
+                }
+            }
+            out
+        }
+        Some(Value::Object(o)) => o
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        _ => String::new(),
+    }
 }
 
 /// Line prefixes that mark synthetic/system echoes inside string-type user
@@ -54,12 +145,16 @@ const SKIP_USER_PREFIXES: [&str; 6] = [
     "<task-summary>",
 ];
 
-/// Tolerant extraction from one JSONL line. Returns `None` for anything that
-/// is not a displayable chat message (tool_result arrays, meta lines, the 12+
-/// non-conversational line types claude writes).
-pub fn parse_line(v: &Value) -> Option<ChatMsg> {
-    let line_type = v.get("type")?.as_str()?;
-    let message = v.get("message")?;
+/// Tolerant extraction from one JSONL line. Returns zero or more displayable
+/// chat messages (a user line can carry several tool_result blocks). Unknown
+/// line types are ignored silently.
+pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
+    let Some(line_type) = v.get("type").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let Some(message) = v.get("message") else {
+        return Vec::new();
+    };
     let ts = v
         .get("timestamp")
         .and_then(|t| t.as_str())
@@ -68,42 +163,85 @@ pub fn parse_line(v: &Value) -> Option<ChatMsg> {
     match line_type {
         "user" => {
             if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
-                return None;
+                return Vec::new();
             }
             if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
-                return None;
+                return Vec::new();
             }
-            // String content = a real prompt; array content = tool_result.
-            let text = message.get("content").and_then(Value::as_str)?.trim();
-            if text.is_empty() {
-                return None;
+            // Array content = tool results (or other synthetic blocks).
+            if let Some(blocks) = message.get("content").and_then(Value::as_array) {
+                let mut out = Vec::new();
+                for block in blocks {
+                    if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                        continue;
+                    }
+                    let call_id = block
+                        .get("tool_use_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    if call_id.is_empty() {
+                        continue;
+                    }
+                    let is_error = block
+                        .get("is_error")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let text = extract_result_text(block.get("content"));
+                    out.push(ChatMsg {
+                        key: format!("tr-{call_id}"),
+                        role: Role::User,
+                        text: String::new(),
+                        thinking: None,
+                        tool_calls: Vec::new(),
+                        tool_result: Some(ToolResult {
+                            call_id,
+                            is_error,
+                            text: truncate_chars(&text, TOOL_RESULT_MAX),
+                        }),
+                        ts: ts.clone(),
+                        done: true,
+                    });
+                }
+                return out;
             }
-            if SKIP_USER_PREFIXES.iter().any(|p| text.starts_with(p)) {
-                return None;
+            // String content = a real prompt.
+            let Some(raw) = message.get("content").and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            let text = raw.trim();
+            if text.is_empty() || SKIP_USER_PREFIXES.iter().any(|p| text.starts_with(p)) {
+                return Vec::new();
             }
-            let key = v.get("uuid").and_then(Value::as_str)?.to_string();
-            Some(ChatMsg {
-                key,
+            let Some(key) = v.get("uuid").and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            vec![ChatMsg {
+                key: key.to_string(),
                 role: Role::User,
                 text: text.to_string(),
                 thinking: None,
-                tools: Vec::new(),
+                tool_calls: Vec::new(),
+                tool_result: None,
                 ts,
                 done: true,
-            })
+            }]
         }
         "assistant" => {
             if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
-                return None;
+                return Vec::new();
             }
-            let key = message
+            let Some(key) = message
                 .get("id")
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .or_else(|| v.get("uuid").and_then(Value::as_str).map(str::to_string))?;
+                .or_else(|| v.get("uuid").and_then(Value::as_str).map(str::to_string))
+            else {
+                return Vec::new();
+            };
             let mut text = String::new();
             let mut thinking = None;
-            let mut tools = Vec::new();
+            let mut tool_calls = Vec::new();
             if let Some(blocks) = message.get("content").and_then(Value::as_array) {
                 for block in blocks {
                     match block.get("type").and_then(Value::as_str) {
@@ -121,29 +259,42 @@ pub fn parse_line(v: &Value) -> Option<ChatMsg> {
                             }
                         }
                         Some("tool_use") => {
-                            if let Some(name) = block.get("name").and_then(Value::as_str) {
-                                tools.push(name.to_string());
-                            }
+                            let name = block
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("tool")
+                                .to_string();
+                            let id = block
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string();
+                            tool_calls.push(ToolCall {
+                                id,
+                                name,
+                                detail: summarize_tool_input(block.get("input")),
+                            });
                         }
                         _ => {}
                     }
                 }
             }
-            if text.is_empty() && thinking.is_none() && tools.is_empty() {
-                return None;
+            if text.is_empty() && thinking.is_none() && tool_calls.is_empty() {
+                return Vec::new();
             }
             let done = message.get("stop_reason").is_some();
-            Some(ChatMsg {
+            vec![ChatMsg {
                 key,
                 role: Role::Assistant,
                 text,
                 thinking,
-                tools,
+                tool_calls,
+                tool_result: None,
                 ts,
                 done,
-            })
+            }]
         }
-        _ => None, // system / mode / api-request / attachment / ... — ignored
+        _ => Vec::new(), // system / mode / api-request / attachment / ... — ignored
     }
 }
 
@@ -211,7 +362,9 @@ mod tests {
             "timestamp": "2026-11-04T00:00:00Z",
             "message": { "role": "user", "content": "你好，请看一下这个目录" }
         });
-        let m = parse_line(&v).unwrap();
+        let msgs = parse_line(&v);
+        assert_eq!(msgs.len(), 1);
+        let m = &msgs[0];
         assert_eq!(m.role, Role::User);
         assert_eq!(m.key, "u1");
         assert_eq!(m.text, "你好，请看一下这个目录");
@@ -219,24 +372,40 @@ mod tests {
     }
 
     #[test]
-    fn skips_tool_result_and_meta_and_commands() {
-        let tool_result = json!({
+    fn parses_tool_results() {
+        let v = json!({
             "type": "user", "uuid": "u2",
-            "message": { "role": "user", "content": [ { "type": "tool_result", "content": "ok" } ] }
+            "message": { "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "call_1", "content": "file listing\n…" },
+                { "type": "tool_result", "tool_use_id": "call_2", "is_error": true,
+                  "content": [ { "type": "text", "text": "boom" } ] }
+            ] }
         });
-        assert!(parse_line(&tool_result).is_none());
+        let msgs = parse_line(&v);
+        assert_eq!(msgs.len(), 2);
+        let tr0 = msgs[0].tool_result.as_ref().unwrap();
+        assert_eq!(tr0.call_id, "call_1");
+        assert!(!tr0.is_error);
+        assert!(tr0.text.contains("file listing"));
+        let tr1 = msgs[1].tool_result.as_ref().unwrap();
+        assert!(tr1.is_error);
+        assert_eq!(tr1.text, "boom");
+        assert_eq!(msgs[1].key, "tr-call_2");
+    }
 
+    #[test]
+    fn skips_meta_and_commands() {
         let meta = json!({
             "type": "user", "uuid": "u3", "isMeta": true,
             "message": { "role": "user", "content": "meta text" }
         });
-        assert!(parse_line(&meta).is_none());
+        assert!(parse_line(&meta).is_empty());
 
         let command = json!({
             "type": "user", "uuid": "u4",
             "message": { "role": "user", "content": "<command-name>/clear</command-name>" }
         });
-        assert!(parse_line(&command).is_none());
+        assert!(parse_line(&command).is_empty());
     }
 
     #[test]
@@ -245,9 +414,10 @@ mod tests {
             "type": "assistant", "uuid": "a1",
             "message": { "id": "msg_1", "content": [ { "type": "text", "text": "partial" } ] }
         });
-        let m = parse_line(&first).unwrap();
-        assert_eq!(m.key, "msg_1");
-        assert!(!m.done);
+        let msgs = parse_line(&first);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].key, "msg_1");
+        assert!(!msgs[0].done);
 
         let final_line = json!({
             "type": "assistant", "uuid": "a1",
@@ -257,23 +427,39 @@ mod tests {
                 "content": [
                     { "type": "thinking", "thinking": "hmm" },
                     { "type": "text", "text": "final text" },
-                    { "type": "tool_use", "name": "Bash" }
+                    { "type": "tool_use", "id": "call_9", "name": "Bash",
+                      "input": { "command": "ls -la && echo hi" } }
                 ]
             }
         });
-        let m = parse_line(&final_line).unwrap();
+        let msgs = parse_line(&final_line);
+        assert_eq!(msgs.len(), 1);
+        let m = &msgs[0];
         assert_eq!(m.key, "msg_1");
         assert_eq!(m.text, "final text");
         assert_eq!(m.thinking.as_deref(), Some("hmm"));
-        assert_eq!(m.tools, vec!["Bash"]);
+        assert_eq!(m.tool_calls.len(), 1);
+        assert_eq!(m.tool_calls[0].id, "call_9");
+        assert_eq!(m.tool_calls[0].name, "Bash");
+        assert_eq!(m.tool_calls[0].detail, "ls -la && echo hi");
         assert!(m.done);
+    }
+
+    #[test]
+    fn tool_detail_from_various_inputs() {
+        assert_eq!(
+            summarize_tool_input(Some(&json!({ "file_path": "/tmp/a.rs" }))),
+            "/tmp/a.rs"
+        );
+        assert!(summarize_tool_input(Some(&json!({ "weird_key": 42 }))).contains("weird_key"));
+        assert_eq!(summarize_tool_input(None), "");
     }
 
     #[test]
     fn ignores_non_conversational_types() {
         for t in ["system", "mode", "permission-mode", "api-request", "file-history-snapshot"] {
             let v = json!({ "type": t, "message": { "role": "user", "content": "x" } });
-            assert!(parse_line(&v).is_none(), "{t} should be ignored");
+            assert!(parse_line(&v).is_empty(), "{t} should be ignored");
         }
     }
 }
