@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod google;
+pub mod local;
 
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
@@ -85,12 +86,23 @@ pub fn chunk(text: &str, max: usize) -> Vec<String> {
 // fenced block and inline code span for a `@@C<n>@@` sentinel (Google passes
 // those through verbatim), then restore them in the output.
 
-/// A span swapped out for a `@@C<n>@@` sentinel. `fenced` marks multi-line
-/// fenced code blocks, whose fence lines must land on line boundaries when
-/// restored (a fence glued to surrounding text is no longer a fence).
+/// What a sentinel stood in for; drives how it is restored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockKind {
+    /// Inline code span — restored verbatim in place.
+    Inline,
+    /// Fenced code block — fence lines must land on line boundaries (a fence
+    /// glued to surrounding text is no longer a fence).
+    Fenced,
+    /// A paragraph break (blank-line run). Translation models collapse these,
+    /// so the break is swapped out like code and re-anchored on restore.
+    Break,
+}
+
+/// A span swapped out for a `@@C<n>@@` sentinel.
 pub struct ProtectedBlock {
     pub text: String,
-    pub fenced: bool,
+    pub kind: BlockKind,
 }
 
 /// Replaces fenced code blocks and inline code spans with sentinels.
@@ -113,7 +125,7 @@ pub fn protect_code(input: &str) -> (String, Vec<ProtectedBlock>) {
                 out.push_str(&format!("@@C{}@@\n", blocks.len()));
                 blocks.push(ProtectedBlock {
                     text: fence_buf.trim_end_matches('\n').to_string(),
-                    fenced: true,
+                    kind: BlockKind::Fenced,
                 });
                 fence_buf.clear();
                 fence = None;
@@ -133,6 +145,60 @@ pub fn protect_code(input: &str) -> (String, Vec<ProtectedBlock>) {
         out.push_str(&fence_buf);
     }
     (out, blocks)
+}
+
+/// Swaps blank-line runs (paragraph breaks) for sentinels, appending the
+/// originals to `blocks`. Sequence: call after [`protect_code`] so blank
+/// lines inside fenced blocks are already hidden.
+///
+/// Local MT models collapse paragraph breaks into a single newline, merging
+/// markdown paragraphs; the sentinel survives translation and [`restore_code`]
+/// re-anchors one blank line.
+pub fn protect_breaks(input: &str, blocks: &mut Vec<ProtectedBlock>) -> String {
+    let b = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut last = 0; // start of the slice not yet flushed to `out`
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'\n' {
+            i += 1;
+            continue;
+        }
+        // Match a run of two or more newlines separated only by blanks.
+        // The indentation of the following line is left untouched.
+        let mut newlines = 1;
+        let mut end = i + 1;
+        let mut j = i + 1;
+        loop {
+            let mut k = j;
+            while k < b.len() && (b[k] == b' ' || b[k] == b'\t') {
+                k += 1;
+            }
+            if k < b.len() && b[k] == b'\n' {
+                newlines += 1;
+                end = k + 1;
+                j = k + 1;
+            } else {
+                break;
+            }
+        }
+        if newlines >= 2 {
+            out.push_str(&input[last..i]);
+            out.push(' ');
+            out.push_str(&format!("@@C{}@@", blocks.len()));
+            out.push(' ');
+            blocks.push(ProtectedBlock {
+                text: "\n\n".to_string(),
+                kind: BlockKind::Break,
+            });
+            last = end;
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&input[last..]);
+    out
 }
 
 /// Returns `(character, run length, rest of line)` when `line` starts with an
@@ -159,7 +225,7 @@ fn protect_inline_code(line: &str, blocks: &mut Vec<ProtectedBlock>) -> String {
                 out.push_str(&format!("@@C{}@@", blocks.len()));
                 blocks.push(ProtectedBlock {
                     text: span.to_string(),
-                    fenced: false,
+                    kind: BlockKind::Inline,
                 });
                 rest = &after[end + 1..];
             }
@@ -197,19 +263,40 @@ pub fn restore_code(translated: &str, blocks: &[ProtectedBlock]) -> String {
             .and_then(|i| blocks.get(i));
         match block {
             Some(block) => {
-                if block.fenced {
-                    while out.ends_with(' ') || out.ends_with('\t') {
-                        out.pop();
+                match block.kind {
+                    BlockKind::Fenced => {
+                        while out.ends_with(' ') || out.ends_with('\t') {
+                            out.pop();
+                        }
+                        if !out.is_empty() && !out.ends_with('\n') {
+                            out.push('\n');
+                        }
+                        out.push_str(&block.text);
+                        if !block.text.ends_with('\n') {
+                            out.push('\n');
+                        }
                     }
-                    if !out.is_empty() && !out.ends_with('\n') {
+                    BlockKind::Break => {
+                        // The model pads sentinels with spaces on both sides
+                        // and turns "\n\n" into its own line break; re-anchor
+                        // one blank line and drop the padding. Always emit
+                        // the full blank line: during streaming the text
+                        // before the sentinel may already have been flushed
+                        // in an earlier delta (leaving `out` empty here).
+                        while out.ends_with(' ') || out.ends_with('\t') {
+                            out.pop();
+                        }
+                        if !out.ends_with('\n') {
+                            out.push('\n');
+                        }
                         out.push('\n');
+                        rest = &after[digits + 2..];
+                        rest = rest.trim_start_matches([' ', '\t']);
+                        continue;
                     }
-                    out.push_str(&block.text);
-                    if !block.text.ends_with('\n') {
-                        out.push('\n');
+                    BlockKind::Inline => {
+                        out.push_str(&block.text);
                     }
-                } else {
-                    out.push_str(&block.text);
                 }
                 rest = &after[digits + 2..];
             }
@@ -411,7 +498,7 @@ mod tests {
             "intro\n\n````markdown\n# Title\n\n```text\ndiagram\n```\n\n```bash\nls\n```\n````\n";
         let (protected, blocks) = protect_code(input);
         assert_eq!(blocks.len(), 1);
-        assert!(blocks[0].fenced);
+        assert_eq!(blocks[0].kind, BlockKind::Fenced);
         assert!(blocks[0].text.starts_with("````markdown"));
         assert!(blocks[0].text.ends_with("````"));
         assert!(!protected.contains("diagram"));
@@ -454,6 +541,47 @@ mod tests {
     fn restored_probe(s: &str) -> String {
         // pretend the translator returned the protected text unchanged
         s.to_string()
+    }
+
+    #[test]
+    fn break_sentinels_roundtrip_paragraphs() {
+        let input = "第一段。\n\n第二段。\n\n```js\ncode\n```\n\n第三段。";
+        let (protected, mut blocks) = protect_code(input);
+        let protected = protect_breaks(&protected, &mut blocks);
+        // No raw blank lines survive for the model to collapse.
+        assert!(!protected.contains("\n\n"));
+        assert_eq!(restore_code(&protected, &blocks), input);
+    }
+
+    #[test]
+    fn break_sentinels_tolerate_model_padding() {
+        let input = "Start.\n\nEnd.";
+        let (protected, mut blocks) = protect_code(input);
+        let protected = protect_breaks(&protected, &mut blocks);
+        // The model likes to pad sentinels with spaces and may split text
+        // across deltas; restoring must still yield exactly one blank line.
+        let model_out = protected.replace("@@C0@@", "  @@C0@@  ");
+        assert_eq!(restore_code(&model_out, &blocks), "Start.\n\nEnd.");
+
+        // When the text before the sentinel was already flushed in an
+        // earlier delta, its trailing model padding can't be trimmed any
+        // more — the streamed text keeps a cosmetic space, while the final
+        // full restore (what gets persisted) is exact.
+        let (before, after) = model_out.split_once("@@C0@@").unwrap();
+        let mut streamed = restore_code(before, &blocks);
+        streamed.push_str(&restore_code(&format!("@@C0@@{after}"), &blocks));
+        let words: Vec<&str> = streamed.split_whitespace().collect();
+        assert_eq!(words, ["Start.", "End."]);
+    }
+
+    #[test]
+    fn protect_breaks_keeps_single_newlines_and_indentation() {
+        let input = "line one\nline two\n\n  indented\n";
+        let mut blocks = Vec::new();
+        let out = protect_breaks(input, &mut blocks);
+        assert_eq!(blocks.len(), 1);
+        assert!(out.contains("line one\nline two"));
+        assert!(out.contains("  indented"));
     }
 
     #[test]

@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Vendored crate build output
+/src-tauri/vendor/hy-mt-core/target/
+/src-tauri/vendor/hy-mt-core/Cargo.lock

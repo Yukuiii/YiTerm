@@ -21,10 +21,12 @@ export interface ConversationsOverview {
 }
 
 export interface TranslationSettings {
-  mode: 'google' | 'chat';
+  mode: 'google' | 'chat' | 'local';
   targetZh: string;
   chatBaseUrl: string | null;
   chatModelId: string | null;
+  /** Custom GGUF path for local mode; null → managed download location. */
+  localModelPath: string | null;
 }
 
 export interface Settings {
@@ -149,6 +151,34 @@ export const settingsSet = (settings: Settings) =>
 export const apiKeyGet = () => invoke<string | null>('api_key_get');
 
 export const apiKeySet = (key: string | null) => invoke<void>('api_key_set', { key });
+
+// ---------- local model ----------
+
+export interface ModelStatus {
+  state: 'missing' | 'downloading' | 'ready' | 'error';
+  downloaded: number;
+  total: number;
+  path: string;
+  message: string | null;
+}
+
+export interface ModelProgress {
+  state: 'downloading' | 'ready' | 'error';
+  downloaded: number;
+  total: number;
+  message: string | null;
+}
+
+export const modelStatus = () => invoke<ModelStatus>('model_status');
+
+/** Starts (or resumes) the background download; progress via onModelProgress. */
+export const modelDownload = () => invoke<void>('model_download');
+
+export const modelDelete = () => invoke<void>('model_delete');
+
+export function onModelProgress(cb: (p: ModelProgress) => void): Promise<UnlistenFn> {
+  return listen<ModelProgress>('model-progress', (e) => cb(e.payload));
+}
 
 // ---------- translate ----------
 

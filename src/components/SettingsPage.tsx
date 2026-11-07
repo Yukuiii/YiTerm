@@ -1,6 +1,17 @@
-import { useState } from 'react';
-import { translate, type Settings } from '../ipc';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  modelDelete,
+  modelDownload,
+  modelStatus,
+  onModelProgress,
+  translate,
+  type ModelStatus,
+  type Settings,
+} from '../ipc';
+import type { UnlistenFn } from '@tauri-apps/api/event';
 import { useSettingsStore } from '../stores/settings';
+
+const fmtMB = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
 
 export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const { settings, hasApiKey, save, setApiKey } = useSettingsStore();
@@ -10,8 +21,40 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [model, setModel] = useState<ModelStatus | null>(null);
 
   const current = draft ?? settings;
+
+  // Status is best-effort; on failure the section simply stays blank.
+  const refreshModel = useCallback(() => {
+    modelStatus()
+      .then((s) => setModel(s))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    refreshModel();
+    let unlisten: UnlistenFn | undefined;
+    let alive = true;
+    void onModelProgress((p) => {
+      setModel((prev) => ({
+        state: p.state,
+        downloaded: p.downloaded,
+        total: p.total,
+        path: prev?.path ?? '',
+        message: p.message,
+      }));
+      if (p.state === 'ready') refreshModel();
+    }).then((un) => {
+      if (alive) unlisten = un;
+      else un();
+    });
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, [refreshModel]);
+
   if (!current) return null;
   const t = current.translation;
 
@@ -23,6 +66,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
     }
     setSaved(true);
     window.setTimeout(() => setSaved(false), 1500);
+    refreshModel();
   };
 
   const runTest = async () => {
@@ -43,6 +87,28 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
       setTesting(false);
     }
   };
+
+  const startDownload = async () => {
+    try {
+      await modelDownload();
+    } catch (e) {
+      setTestResult(`❌ ${String(e)}`);
+    }
+  };
+
+  const removeModel = async () => {
+    if (!window.confirm('删除本地翻译模型（约 907 MB）？下次使用需重新下载。')) return;
+    try {
+      await modelDelete();
+    } finally {
+      refreshModel();
+    }
+  };
+
+  const pct =
+    model && model.total > 0
+      ? Math.min(100, Math.floor((model.downloaded / model.total) * 100))
+      : 0;
 
   return (
     <div className="settings-overlay">
@@ -76,6 +142,18 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
             <div>
               <div className="radio-title">Chat 模式</div>
               <div className="radio-desc">任意 OpenAI 兼容接口（OpenAI / DeepSeek / Qwen / 自建…）</div>
+            </div>
+          </label>
+          <label className="radio-row">
+            <input
+              type="radio"
+              name="mode"
+              checked={t.mode === 'local'}
+              onChange={() => setDraft({ ...current, translation: { ...t, mode: 'local' } })}
+            />
+            <div>
+              <div className="radio-title">本地模型 Hy-MT2-1.8B</div>
+              <div className="radio-desc">离线翻译，不依赖网络；占用约 907 MB 磁盘，运行时约占 2–3 GB 内存</div>
             </div>
           </label>
 
@@ -116,6 +194,59 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                   清除已保存的 API Key
                 </button>
               )}
+            </div>
+          )}
+
+          {t.mode === 'local' && (
+            <div className="chat-config">
+              <label>
+                模型文件路径（留空使用内置下载位置）
+                <input
+                  type="text"
+                  placeholder={model?.path || '自动管理'}
+                  value={t.localModelPath ?? ''}
+                  onChange={(e) =>
+                    setDraft({ ...current, translation: { ...t, localModelPath: e.target.value || null } })
+                  }
+                />
+              </label>
+              <div className="model-status">
+                {!model && <span>正在读取模型状态…</span>}
+                {model?.state === 'ready' && (
+                  <span className="model-ready">✓ 模型已就绪（{model.path}）</span>
+                )}
+                {model?.state === 'missing' && <span>模型未下载（约 907 MB）。</span>}
+                {model?.state === 'downloading' && (
+                  <div className="model-progress-wrap">
+                    <div className="model-progress">
+                      <div className="model-progress-fill" style={{ width: `${pct}%` }} />
+                    </div>
+                    <span>
+                      下载中 {pct}%（{fmtMB(model.downloaded)} / {fmtMB(model.total)}）
+                    </span>
+                  </div>
+                )}
+                {model?.state === 'error' && (
+                  <span className="model-error">
+                    ❌ 下载失败：{model.message ?? '未知错误'}
+                  </span>
+                )}
+              </div>
+              <div className="model-actions">
+                {(model?.state === 'missing' || model?.state === 'error') && (
+                  <button className="primary-btn" onClick={() => void startDownload()}>
+                    {model?.state === 'error' ? '重试下载' : '下载模型'}
+                  </button>
+                )}
+                {model?.state === 'ready' && !(t.localModelPath ?? '').trim() && (
+                  <button className="ghost-btn" onClick={() => void removeModel()}>
+                    删除模型文件
+                  </button>
+                )}
+              </div>
+              <div className="radio-desc">
+                首次启动应用时会在后台自动下载；保存路径设置后点击下方「保存」生效。
+              </div>
             </div>
           )}
         </section>

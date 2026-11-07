@@ -536,15 +536,54 @@ pub fn api_key_set(key: Option<String>) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn translate(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     request_id: String,
     direction: Direction,
     text: String,
     channel: Channel<TranslateEvent>,
 ) -> Result<String, String> {
-    let http = state.http.clone();
     let settings = state.settings.read().unwrap().clone();
+    if settings.translation.mode == "local" {
+        return translate::local::translate(
+            &app,
+            &state,
+            direction,
+            &text,
+            &request_id,
+            &channel,
+        )
+        .await;
+    }
+    let http = state.http.clone();
     translate::run(&http, &settings.translation, direction, &text, &request_id, &channel).await
+}
+
+// ---------- local model management ----------
+
+/// Current state of the embedded Hy-MT2-1.8B model file.
+#[tauri::command]
+pub fn model_status(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> translate::local::ModelStatus {
+    translate::local::status(&app, &state)
+}
+
+/// Starts (or resumes) the background model download; progress arrives as
+/// `model-progress` events.
+#[tauri::command]
+pub fn model_download(app: tauri::AppHandle) -> Result<(), String> {
+    translate::local::start_download(&app)
+}
+
+/// Deletes the model file and unloads the in-memory translator.
+#[tauri::command]
+pub async fn model_delete(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    translate::local::delete_model(&app, &state).await
 }
 
 #[cfg(test)]
