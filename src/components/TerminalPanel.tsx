@@ -43,11 +43,21 @@ export default function TerminalPanel({ convId }: { convId: string }) {
       if (!info || disposed) return;
       terminalIdRef.current = info.terminalId;
 
-      // 2. Build the xterm view.
+      // 2. Wait for the bundled terminal font, otherwise xterm measures the
+      // fallback face and the glyph cells come out the wrong size.
+      await Promise.all([
+        document.fonts.load('400 12.5px "Ioskeley Mono Term"'),
+        document.fonts.load('700 12.5px "Ioskeley Mono Term"'),
+        document.fonts.load('italic 400 12.5px "Ioskeley Mono Term"'),
+        document.fonts.load('italic 700 12.5px "Ioskeley Mono Term"'),
+      ]).catch(() => {});
+      if (disposed) return;
+
+      // 3. Build the xterm view.
       term = new Terminal({
         cursorBlink: true,
         fontSize: 12.5,
-        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+        fontFamily: "'Ioskeley Mono Term', ui-monospace, SFMono-Regular, Menlo, monospace",
         theme: {
           background: '#0c0c0c',
           foreground: '#d7d7d7',
@@ -63,13 +73,13 @@ export default function TerminalPanel({ convId }: { convId: string }) {
       try { fit.fit(); } catch { /* host not sized yet */ }
       void terminalResize(info.terminalId, term.cols, term.rows);
 
-      // 3. Keystrokes → PTY.
+      // 4. Keystrokes → PTY.
       term.onData((data) => {
         const id = terminalIdRef.current;
         if (id !== null) void terminalWrite(id, data, false);
       });
 
-      // 4. Backlog replay + live stream.
+      // 5. Backlog replay + live stream.
       const channel = new Channel<TerminalEvent>();
       channel.onmessage = (ev) => {
         if (ev.type === 'data') {
@@ -81,7 +91,7 @@ export default function TerminalPanel({ convId }: { convId: string }) {
       };
       await terminalAttach(info.terminalId, 0, channel);
 
-      // 5. ResizeObserver → debounced fit → PTY resize.
+      // 6. ResizeObserver → debounced fit → PTY resize.
       observer = new ResizeObserver(() => {
         if (resizeTimer !== undefined) window.clearTimeout(resizeTimer);
         resizeTimer = window.setTimeout(() => {

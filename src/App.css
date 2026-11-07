@@ -38,6 +38,37 @@ html, body, #root {
 
 button, input, textarea { font-family: inherit; }
 
+/* Terminal typeface — Ioskeley Mono Term (SIL OFL 1.1).
+   Bundled in assets/fonts/; see OFL.txt for the license. */
+@font-face {
+  font-family: 'Ioskeley Mono Term';
+  src: url('./assets/fonts/IoskeleyMonoTerm-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Ioskeley Mono Term';
+  src: url('./assets/fonts/IoskeleyMonoTerm-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Ioskeley Mono Term';
+  src: url('./assets/fonts/IoskeleyMonoTerm-Italic.ttf') format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Ioskeley Mono Term';
+  src: url('./assets/fonts/IoskeleyMonoTerm-BoldItalic.ttf') format('truetype');
+  font-weight: 700;
+  font-style: italic;
+  font-display: block;
+}
+
 /* Explicit two-column grid instead of flex: WebKit occasionally collapsed the
    fixed-width sidebar flex item on the initial paint (main got full width),
    and a resize was needed to fix it. */

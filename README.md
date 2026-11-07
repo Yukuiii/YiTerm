@@ -114,6 +114,10 @@ YiTerm auto-detects `claude` in `~/.local/bin` or on `PATH`. You can point it at
 - Free Google endpoints can be rate-limited or unreachable without a proxy; use a proxy or Chat mode.
 - Machine translation is approximate — review important technical text before relying on it.
 
+## Credits
+
+- Terminal typeface: [Ioskeley Mono](https://github.com/ahatem/IoskeleyMono) — SIL Open Font License 1.1 (`src/assets/fonts/OFL.txt`).
+
 ## License
 
 [MIT](LICENSE)
