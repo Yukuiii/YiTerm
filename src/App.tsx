@@ -28,6 +28,7 @@ import './App.css';
 export default function App() {
   const activeId = useConversationsStore((s) => s.activeId);
   const conversations = useConversationsStore((s) => s.list);
+  const projects = useConversationsStore((s) => s.projects);
   const loadConvs = useConversationsStore((s) => s.load);
   const createConv = useConversationsStore((s) => s.create);
   const removeConv = useConversationsStore((s) => s.remove);
@@ -53,7 +54,12 @@ export default function App() {
     void loadConvs();
     void currentUser().then(setUserName).catch(() => {});
     const un = onSessionUpdate((payload) => {
-      useChatStore.getState().upsertFromSession(payload.conversationId, payload.upserts);
+      // Imported history is shown as-is; only activity after attaching gets
+      // the usual en→zh treatment.
+      const translate = !(payload.imported && payload.historical);
+      useChatStore
+        .getState()
+        .upsertFromSession(payload.conversationId, payload.upserts, translate);
     });
     return () => {
       void un.then((f) => f());
@@ -64,6 +70,24 @@ export default function App() {
     localStorage.setItem('yiterm.viewMode', viewMode);
   }, [viewMode]);
 
+  // Claude Code can start sessions outside YiTerm (CLI, another window).
+  // Re-scan while visible and whenever the window regains focus.
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === 'visible') {
+        void useConversationsStore.getState().refresh();
+      }
+    };
+    const timer = window.setInterval(refresh, 5000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, []);
+
   // The terminal must run in both view modes (chat replies depend on it), so
   // start it here rather than only when TerminalPanel mounts.
   useEffect(() => {
@@ -71,9 +95,13 @@ export default function App() {
     void useTerminalsStore.getState().ensureStarted(activeId).catch(() => {});
   }, [activeId]);
 
-  // Hydrate caches so sidebar labels can use the first user prompt.
+  // Hydrate caches so sidebar labels can use the first user prompt. Imported
+  // sessions only hydrate when opened (ChatPanel does it); most have no cache,
+  // and the backend title is enough for the sidebar.
   useEffect(() => {
-    for (const c of conversations) void useChatStore.getState().hydrate(c.id);
+    for (const c of conversations) {
+      if (!c.imported) void useChatStore.getState().hydrate(c.id);
+    }
   }, [conversations]);
 
   const recentFolders = useMemo(() => {
@@ -215,6 +243,7 @@ export default function App() {
       <SidebarBoundary>
         <Sidebar
           conversations={conversations}
+          projects={projects}
           activeId={activeId}
           titles={titles}
           mode={viewMode}

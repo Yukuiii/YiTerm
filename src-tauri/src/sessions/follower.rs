@@ -12,6 +12,11 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300)
 pub struct SessionUpdate {
     pub conversation_id: String,
     pub session_id: String,
+    /// The conversation came from Claude's records, not YiTerm.
+    pub imported: bool,
+    /// This batch is the transcript that already existed when the follower
+    /// attached, not something written just now.
+    pub historical: bool,
     pub upserts: Vec<ChatMsg>,
 }
 
@@ -19,21 +24,24 @@ pub struct SessionUpdate {
 /// events. Polling (not FSEvents) on purpose: files are local, append-only,
 /// may not exist until the first message, and a 300 ms stat loop over a
 /// handful of files is negligible.
+///
+/// The caller resolves `path` (see `claude::resolve_jsonl`): imported sessions
+/// may live under a project directory whose name does not match the
+/// canonicalized workspace folder.
 pub fn spawn_follower(
     app: tauri::AppHandle,
     conv_id: String,
-    folder: String,
+    path: PathBuf,
     session_id: String,
+    imported: bool,
 ) -> tokio::task::JoinHandle<()> {
-    let Some(home) = dirs::home_dir() else {
-        tracing::warn!("no home dir, cannot follow sessions");
-        return tokio::spawn(async {});
-    };
-    let path: PathBuf = super::jsonl_path(&home, &folder, &session_id);
     tracing::info!(?path, conv_id = %conv_id, "follower started");
     tokio::spawn(async move {
         let mut last_pos: u64 = 0;
         let mut partial: Vec<u8> = Vec::new();
+        // The first batch read from an existing file is history, not live
+        // activity; imported conversations use this to skip translation.
+        let mut historical = true;
         // key → last emitted JSON; dedupes streaming snapshot re-emissions.
         let mut emitted: HashMap<String, String> = HashMap::new();
 
@@ -50,6 +58,7 @@ pub fn spawn_follower(
                 last_pos = 0;
                 partial.clear();
                 emitted.clear();
+                historical = true;
             }
             if len <= last_pos && partial.is_empty() {
                 continue;
@@ -102,11 +111,14 @@ pub fn spawn_follower(
                 let update = SessionUpdate {
                     conversation_id: conv_id.clone(),
                     session_id: session_id.clone(),
+                    imported,
+                    historical,
                     upserts,
                 };
                 if let Err(e) = app.emit("session-update", &update) {
                     tracing::warn!(error = %e, "emit session-update failed");
                 }
+                historical = false;
             }
         }
     })

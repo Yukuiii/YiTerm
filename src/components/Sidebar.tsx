@@ -17,6 +17,8 @@ import {
 
 interface SidebarProps {
   conversations: Conversation[];
+  /** Registered Claude Code projects, including ones with no sessions yet. */
+  projects: string[];
   activeId: string | null;
   titles: Record<string, string>;
   mode: ViewMode;
@@ -33,6 +35,7 @@ interface SidebarProps {
 
 export default function Sidebar({
   conversations,
+  projects,
   activeId,
   titles,
   mode,
@@ -61,6 +64,11 @@ export default function Sidebar({
       if (bucket) bucket.push(c);
       else map.set(c.folder, [c]);
     }
+    // Claude projects without sessions still get a group (with "+"), so every
+    // project registered in ~/.claude.json is reachable from the sidebar.
+    for (const folder of projects) {
+      if (!map.has(folder)) map.set(folder, []);
+    }
     return Array.from(map.entries()).map(([folder, convs]) => ({
       folder,
       name: folderName(folder),
@@ -69,7 +77,7 @@ export default function Sidebar({
         label: titles[conv.id] ?? oneLine(conv.title || folderName(conv.folder), 48),
       })),
     }));
-  }, [conversations, titles]);
+  }, [conversations, titles, projects]);
 
   const visibleGroups = useMemo(() => {
     if (!q) return groups;
@@ -203,6 +211,7 @@ export default function Sidebar({
                 </div>
                 {open && (
                   <div className="sessions">
+                    {g.convs.length === 0 && <div className="session-empty">暂无会话</div>}
                     {g.convs.map(({ conv, label }) => (
                       <div
                         key={conv.id}
@@ -219,16 +228,18 @@ export default function Sidebar({
                         }}
                       >
                         <span className="session-title">{label}</span>
-                        <button
-                          className="session-del"
-                          title="删除会话"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onDelete(conv);
-                          }}
-                        >
-                          <XIcon size={13} />
-                        </button>
+                        {!conv.imported && (
+                          <button
+                            className="session-del"
+                            title="删除会话"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onDelete(conv);
+                            }}
+                          >
+                            <XIcon size={13} />
+                          </button>
+                        )}
                       </div>
                     ))}
                   </div>

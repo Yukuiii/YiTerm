@@ -11,6 +11,13 @@ export interface Conversation {
   terminalId: number | null;
   title: string;
   createdAt: string;
+  /** Discovered from Claude Code's records rather than created in YiTerm. */
+  imported?: boolean;
+}
+
+export interface ConversationsOverview {
+  conversations: Conversation[];
+  projects: string[];
 }
 
 export interface TranslationSettings {
@@ -55,6 +62,10 @@ export interface ChatMsg {
 export interface SessionUpdate {
   conversationId: string;
   sessionId: string;
+  /** The conversation came from Claude's records, not YiTerm. */
+  imported: boolean;
+  /** The batch is transcript history replayed on attach, not live activity. */
+  historical: boolean;
   upserts: ChatMsg[];
 }
 
@@ -100,7 +111,8 @@ export const terminalKill = (id: number) => invoke<void>('terminal_kill', { id }
 
 // ---------- conversations ----------
 
-export const conversationsList = () => invoke<Conversation[]>('conversations_list');
+/** YiTerm conversations plus Claude Code's projects and session transcripts. */
+export const conversationsList = () => invoke<ConversationsOverview>('conversations_list');
 
 export const conversationsCreate = (folder: string, title?: string) =>
   invoke<Conversation>('conversations_create', { folder, title: title ?? null });

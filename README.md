@@ -40,6 +40,9 @@ Claude Code is a great coding agent, but it works in English and its conversatio
   - tool commands, results, and errors revealed on expand
 - **GitHub-flavoured Markdown**: tables, code blocks, lists; links open in the system browser
 - **Project-grouped sessions** with search and per-project “new session”
+- **Claude Code records in the sidebar** — every project registered in
+  `~/.claude.json` plus existing CLI sessions are listed and resumable;
+  replayed history is shown as-is, while new replies are still translated
 - **Two layouts**: Code (chat + terminal) and Cowork (chat only)
 - **Persistence**: conversations, chat history, and translation settings
 - **API key in the macOS Keychain**

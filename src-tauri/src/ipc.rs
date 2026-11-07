@@ -53,29 +53,66 @@ pub async fn terminal_start(
         }
     }
 
-    let conv = {
+    // A conversation not created in YiTerm comes from Claude's own records;
+    // adopt it on first open so the rest of the lifecycle is unchanged.
+    let existing = {
         state
             .convs
             .read()
             .unwrap()
             .get(&req.conversation_id)
             .cloned()
-            .ok_or("conversation not found")?
     };
-    let folder = std::fs::canonicalize(&conv.folder)
-        .map_err(|e| format!("folder {:?}: {e}", conv.folder))?
-        .to_string_lossy()
-        .into_owned();
+    let conv = match existing {
+        Some(conv) => conv,
+        None => {
+            let home = dirs::home_dir().ok_or("no home dir")?;
+            let found = sessions::claude::find_session(&home, &req.conversation_id)
+                .ok_or("conversation not found")?;
+            let conv = Conversation {
+                id: found.session_id.clone(),
+                folder: found.folder,
+                session_id: found.session_id,
+                terminal_id: None,
+                title: found.title,
+                created_at: found.modified_ms.to_string(),
+                imported: true,
+            };
+            state
+                .convs
+                .write()
+                .unwrap()
+                .insert(conv.id.clone(), conv.clone());
+            conv
+        }
+    };
+    // Imported sessions must run in the exact cwd Claude recorded: that string
+    // is what its project directory name is derived from, so canonicalizing it
+    // can make `--resume` look in a different project.
+    let folder = if conv.imported {
+        if !std::path::Path::new(&conv.folder).is_dir() {
+            return Err(format!("project folder {:?} no longer exists", conv.folder));
+        }
+        conv.folder.clone()
+    } else {
+        std::fs::canonicalize(&conv.folder)
+            .map_err(|e| format!("folder {:?}: {e}", conv.folder))?
+            .to_string_lossy()
+            .into_owned()
+    };
 
     let claude_path = state.settings.read().unwrap().resolve_claude_path()?;
     let session_id = conv.session_id.clone();
 
-    // Resume if the session file already exists, otherwise seed a new session
-    // id path. The JSONL is created only after the first message, so a
-    // never-used session still takes the `--session-id` branch idempotently.
+    // Resume if the transcript exists anywhere, otherwise seed the path where
+    // a new session will appear. Resolving by session id avoids mismatches
+    // between the recorded cwd and its canonicalized equivalent.
     let home = dirs::home_dir().ok_or("no home dir")?;
-    let jsonl = sessions::jsonl_path(&home, &folder, &session_id);
+    let jsonl = sessions::claude::resolve_jsonl(&home, &folder, &session_id);
     let resumed = jsonl.is_file();
+    if conv.imported && !resumed {
+        return Err("session transcript not found".into());
+    }
 
     let id = state.new_terminal_id();
     let handle = TerminalHandle::spawn(
@@ -93,7 +130,9 @@ pub async fn terminal_start(
     {
         let mut convs = state.convs.write().unwrap();
         if let Some(c) = convs.get_mut(&conv.id) {
-            c.folder = folder.clone();
+            if !c.imported {
+                c.folder = folder;
+            }
             c.terminal_id = Some(id);
         }
     }
@@ -107,7 +146,13 @@ pub async fn terminal_start(
         }
         followers.insert(
             conv.id.clone(),
-            follower::spawn_follower(app.clone(), conv.id.clone(), folder, session_id.clone()),
+            follower::spawn_follower(
+                app.clone(),
+                conv.id.clone(),
+                jsonl,
+                session_id.clone(),
+                conv.imported,
+            ),
         );
     }
 
@@ -207,11 +252,48 @@ fn with_terminal(
 
 // ---------- conversations ----------
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationsOverview {
+    pub conversations: Vec<Conversation>,
+    pub projects: Vec<String>,
+}
+
+/// Stored conversations plus everything Claude Code has on disk: the sidebar
+/// lists both, and empty registered projects are shown as groups too.
 #[tauri::command]
-pub fn conversations_list(state: State<'_, AppState>) -> Vec<Conversation> {
-    let mut list: Vec<Conversation> = state.convs.read().unwrap().values().cloned().collect();
-    list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    list
+pub async fn conversations_list(
+    state: State<'_, AppState>,
+) -> Result<ConversationsOverview, String> {
+    let stored: Vec<Conversation> = {
+        let convs = state.convs.read().unwrap();
+        convs.values().cloned().collect()
+    };
+    let fallback = stored.clone();
+    let Some(home) = dirs::home_dir() else {
+        return Ok(ConversationsOverview {
+            conversations: fallback,
+            projects: Vec::new(),
+        });
+    };
+    match tauri::async_runtime::spawn_blocking(move || {
+        let (conversations, projects) = sessions::claude::overview(&home, stored);
+        ConversationsOverview {
+            conversations,
+            projects,
+        }
+    })
+    .await
+    {
+        Ok(overview) => Ok(overview),
+        Err(e) => {
+            tracing::warn!(error = %e, "claude project scan failed");
+            Ok(ConversationsOverview {
+                conversations: fallback,
+                projects: Vec::new(),
+            })
+        }
+    }
 }
 
 #[tauri::command]
@@ -237,6 +319,7 @@ pub fn conversations_create(
                 .unwrap_or_else(|| folder.clone())
         }),
         created_at: now_iso(),
+        imported: false,
     };
     state.convs.write().unwrap().insert(conv.id.clone(), conv.clone());
     state.persist_conversations(&app);
