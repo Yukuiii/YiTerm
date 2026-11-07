@@ -85,44 +85,69 @@ pub fn chunk(text: &str, max: usize) -> Vec<String> {
 // fenced block and inline code span for a `@@C<n>@@` sentinel (Google passes
 // those through verbatim), then restore them in the output.
 
+/// A span swapped out for a `@@C<n>@@` sentinel. `fenced` marks multi-line
+/// fenced code blocks, whose fence lines must land on line boundaries when
+/// restored (a fence glued to surrounding text is no longer a fence).
+pub struct ProtectedBlock {
+    pub text: String,
+    pub fenced: bool,
+}
+
 /// Replaces fenced code blocks and inline code spans with sentinels.
 /// Returns the protected text plus the original spans (index = sentinel id).
-pub fn protect_code(input: &str) -> (String, Vec<String>) {
-    let mut blocks: Vec<String> = Vec::new();
+pub fn protect_code(input: &str) -> (String, Vec<ProtectedBlock>) {
+    let mut blocks: Vec<ProtectedBlock> = Vec::new();
     let mut out = String::with_capacity(input.len());
-    let mut in_fence = false;
+    // Opening fence: character and run length. A fence closes only on a line
+    // with the same character and at least as long a run (CommonMark), so a
+    // ``` line inside a ```` block stays content.
+    let mut fence: Option<(u8, usize)> = None;
     let mut fence_buf = String::new();
 
     for line in input.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
-            if !in_fence {
-                in_fence = true;
-                fence_buf.clear();
+        if let Some((ch, len)) = fence {
+            let closes = fence_run(line)
+                .is_some_and(|(c, n, rest)| c == ch && n >= len && rest.trim().is_empty());
+            if closes {
                 fence_buf.push_str(line);
+                out.push_str(&format!("@@C{}@@\n", blocks.len()));
+                blocks.push(ProtectedBlock {
+                    text: fence_buf.trim_end_matches('\n').to_string(),
+                    fenced: true,
+                });
+                fence_buf.clear();
+                fence = None;
             } else {
                 fence_buf.push_str(line);
-                in_fence = false;
-                out.push_str(&format!("@@C{}@@\n", blocks.len()));
-                blocks.push(fence_buf.trim_end_matches('\n').to_string());
-                fence_buf.clear();
             }
-            continue;
-        }
-        if in_fence {
+        } else if let Some((ch, len, _)) = fence_run(line) {
+            fence = Some((ch, len));
+            fence_buf.clear();
             fence_buf.push_str(line);
         } else {
             out.push_str(&protect_inline_code(line, &mut blocks));
         }
     }
-    if in_fence {
+    if fence.is_some() {
         // Unterminated fence: keep verbatim rather than translate code as prose.
         out.push_str(&fence_buf);
     }
     (out, blocks)
 }
 
-fn protect_inline_code(line: &str, blocks: &mut Vec<String>) -> String {
+/// Returns `(character, run length, rest of line)` when `line` starts with an
+/// opening fence: three or more backticks or tildes, optionally indented.
+fn fence_run(line: &str) -> Option<(u8, usize, &str)> {
+    let trimmed = line.trim_start();
+    let ch = *trimmed.as_bytes().first()?;
+    if ch != b'`' && ch != b'~' {
+        return None;
+    }
+    let len = trimmed.bytes().take_while(|&b| b == ch).count();
+    (len >= 3).then(|| (ch, len, &trimmed[len..]))
+}
+
+fn protect_inline_code(line: &str, blocks: &mut Vec<ProtectedBlock>) -> String {
     let mut out = String::new();
     let mut rest = line;
     while let Some(start) = rest.find('`') {
@@ -132,7 +157,10 @@ fn protect_inline_code(line: &str, blocks: &mut Vec<String>) -> String {
             Some(end) => {
                 let span = &rest[start..start + 1 + end + 1];
                 out.push_str(&format!("@@C{}@@", blocks.len()));
-                blocks.push(span.to_string());
+                blocks.push(ProtectedBlock {
+                    text: span.to_string(),
+                    fenced: false,
+                });
                 rest = &after[end + 1..];
             }
             None => {
@@ -145,12 +173,54 @@ fn protect_inline_code(line: &str, blocks: &mut Vec<String>) -> String {
     out
 }
 
-/// Restores sentinels in a translated fragment.
-pub fn restore_code(translated: &str, blocks: &[String]) -> String {
-    let mut out = translated.to_string();
-    for (i, block) in blocks.iter().enumerate() {
-        out = out.replace(&format!("@@C{i}@@"), block);
+/// Restores sentinels in a translated fragment. Translators (notably Google's)
+/// collapse the whitespace around sentinels, so fenced blocks are re-anchored
+/// to their own lines; otherwise a fence merges into the surrounding prose and
+/// markdown stops recognising it (a trailing lone fence renders as an empty
+/// code block).
+pub fn restore_code(translated: &str, blocks: &[ProtectedBlock]) -> String {
+    let mut out = String::with_capacity(translated.len());
+    let mut rest = translated;
+    while let Some(start) = rest.find("@@C") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 3..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 || !after[digits..].starts_with("@@") {
+            // A literal "@@C" that is not one of our sentinels.
+            out.push_str("@@C");
+            rest = after;
+            continue;
+        }
+        let block = after[..digits]
+            .parse::<usize>()
+            .ok()
+            .and_then(|i| blocks.get(i));
+        match block {
+            Some(block) => {
+                if block.fenced {
+                    while out.ends_with(' ') || out.ends_with('\t') {
+                        out.pop();
+                    }
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push_str(&block.text);
+                    if !block.text.ends_with('\n') {
+                        out.push('\n');
+                    }
+                } else {
+                    out.push_str(&block.text);
+                }
+                rest = &after[digits + 2..];
+            }
+            None => {
+                // Unknown id: leave the token untouched.
+                out.push_str(&rest[start..start + 3 + digits + 2]);
+                rest = &after[digits + 2..];
+            }
+        }
     }
+    out.push_str(rest);
     out
 }
 
@@ -326,13 +396,59 @@ mod tests {
         assert!(protected.contains("@@C0@@"));
         assert!(protected.contains("@@C1@@"));
         assert_eq!(blocks.len(), 2); // inline first, then fence (scan order)
-        assert!(blocks.iter().any(|b| b.contains("npm run build")));
-        assert!(blocks.iter().any(|b| b.contains("const x = 1;")));
+        assert!(blocks.iter().any(|b| b.text.contains("npm run build")));
+        assert!(blocks.iter().any(|b| b.text.contains("const x = 1;")));
         assert!(protected.contains("## 标题"));
 
         let restored = restore_code(&restored_probe(&protected), &blocks);
         assert!(restored.contains("const x = 1;"));
         assert!(restored.contains("`npm run build`"));
+    }
+
+    #[test]
+    fn longer_fence_contains_shorter_fences() {
+        let input =
+            "intro\n\n````markdown\n# Title\n\n```text\ndiagram\n```\n\n```bash\nls\n```\n````\n";
+        let (protected, blocks) = protect_code(input);
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].fenced);
+        assert!(blocks[0].text.starts_with("````markdown"));
+        assert!(blocks[0].text.ends_with("````"));
+        assert!(!protected.contains("diagram"));
+        assert!(!protected.contains("ls"));
+        assert_eq!(protected, "intro\n\n@@C0@@\n");
+    }
+
+    #[test]
+    fn closing_fence_needs_same_char_and_length() {
+        // A tilde fence does not close a backtick fence.
+        let (_, blocks) = protect_code("```\na\n~~~\nb\n```\n");
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].text.contains("~~~"));
+
+        // Three backticks do not close a four-backtick fence.
+        let (_, blocks) = protect_code("````\na\n```\nb\n````\n");
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].text.contains("```\nb"));
+    }
+
+    #[test]
+    fn restore_anchors_fences_to_their_own_lines() {
+        // Google collapses the newline before a sentinel. Without re-anchoring,
+        // the opening fence merges into the intro and the trailing fence opens
+        // an empty code block in the rendered markdown.
+        let input = "以下是内容：\n\n````markdown\n# hi\n````";
+        let (protected, blocks) = protect_code(input);
+        assert_eq!(protected, "以下是内容：\n\n@@C0@@\n");
+        let restored = restore_code("以下是内容： @@C0@@", &blocks);
+        assert_eq!(restored, "以下是内容：\n````markdown\n# hi\n````\n");
+    }
+
+    #[test]
+    fn restore_keeps_inline_code_inline() {
+        let (_, blocks) = protect_code("use `cargo test` now");
+        let restored = restore_code("使用 @@C0@@ 现在", &blocks);
+        assert_eq!(restored, "使用 `cargo test` 现在");
     }
 
     fn restored_probe(s: &str) -> String {
