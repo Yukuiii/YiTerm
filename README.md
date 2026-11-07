@@ -104,6 +104,8 @@ YiTerm auto-detects `claude` in `~/.local/bin` or on `PATH`. You can point it at
   - `settings.json`
   - `conversations.json`
   - `chats/<conversation-id>.json`
+- **Pasted screenshots** — `~/Library/Caches/com.yiterm.app/images/<conversation-id>/`
+  (disposable; macOS may reclaim them, in which case the history shows `（图片）`)
 - **Logs** — `~/Library/Logs/com.yiterm.app/yiterm.log`
 
 ## Notes and limitations

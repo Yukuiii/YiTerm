@@ -16,6 +16,12 @@ use self::buffer::Backlog;
 const RING_CAP: usize = 1024 * 1024; // 1 MiB backlog
 const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 const FLUSH_SIZE: usize = 64 * 1024;
+/// Claude Code reads + resizes a pasted image off-thread; allow for big screenshots.
+const IMAGE_ATTACH_TIMEOUT: Duration = Duration::from_secs(8);
+/// Grace period between seeing the marker and pressing Enter. The marker is
+/// rendered before Claude clears its paste-in-progress flag, so Enter must not
+/// follow too closely or it is swallowed.
+const IMAGE_ATTACH_SETTLE: Duration = Duration::from_millis(400);
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -147,6 +153,69 @@ impl TerminalHandle {
         Ok(handle)
     }
 
+    /// Writes `text` as a bracketed paste, without submitting.
+    ///
+    /// Claude Code only turns a pasted image *path* into a real `[Image #N]`
+    /// attachment inside its paste handler — the same path arriving as typed
+    /// keys is left as literal text. So image paths must use this, not `write`.
+    pub fn paste(&self, text: &str) -> Result<(), String> {
+        if *self.exited.lock().map_err(|e| e.to_string())? {
+            return Err("terminal exited".into());
+        }
+        let mut guard = self.writer.lock().map_err(|e| e.to_string())?;
+        let w = guard.as_mut().ok_or("terminal closed")?;
+        w.write_all(&bracketed_paste(text))
+            .and_then(|_| w.flush())
+            .map_err(|e| format!("pty paste: {e}"))
+    }
+
+    /// Sends one composer turn: optional text plus zero or more image paths.
+    ///
+    /// Ordering matters. Claude Code reads and resizes a pasted image
+    /// asynchronously, and while that is in flight it swallows Enter and never
+    /// re-issues it — a `\r` written in the same burst as the image paste leaves
+    /// the prompt sitting unsent in its input box. So: paste the paths, wait for
+    /// the `[Image #N]` marker to come back on the PTY, then write text + `\r`
+    /// together exactly as a text-only turn does.
+    pub async fn send_prompt(&self, text: &str, image_paths: &[String]) -> Result<(), String> {
+        if image_paths.is_empty() {
+            return self.write(text, true);
+        }
+        let baseline = self.backlog.lock().map_err(|e| e.to_string())?.written();
+        self.paste(&image_paths.join("\n"))?;
+        if !self.wait_for_image_attach(baseline, IMAGE_ATTACH_TIMEOUT).await {
+            // Still submit: the path is in Claude's input either way and it can
+            // read the file itself. Stranding the turn would be worse.
+            tracing::warn!(target: "yiterm", "image attach marker not seen; submitting anyway");
+        }
+        self.write(text, true)
+    }
+
+    /// Polls the backlog for the attachment marker rendered after a paste.
+    async fn wait_for_image_attach(&self, baseline: u64, timeout: Duration) -> bool {
+        let start = std::time::Instant::now();
+        loop {
+            // Scoped so the std guard is dropped before any await: this future
+            // must stay `Send` for Tauri's async command.
+            let attached = {
+                let backlog = self.backlog.lock().unwrap_or_else(|e| e.into_inner());
+                let (_, bytes) = backlog.replay_after(baseline);
+                image_attach_marker(&bytes)
+            };
+            if attached {
+                // Let the render settle and Claude's paste-in-progress flag
+                // clear before Enter goes out.
+                tokio::time::sleep(IMAGE_ATTACH_SETTLE).await;
+                return true;
+            }
+            let exited = *self.exited.lock().unwrap_or_else(|e| e.into_inner());
+            if exited || start.elapsed() >= timeout {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     /// Writes text to the PTY; `submit` appends `\r` (presses Enter).
     pub fn write(&self, text: &str, submit: bool) -> Result<(), String> {
         if *self.exited.lock().map_err(|e| e.to_string())? {
@@ -247,6 +316,68 @@ impl TerminalHandle {
     }
 }
 
+/// Frames `text` as a bracketed paste (the terminal protocol Claude Code enables
+/// with `ESC [?2004h`). Deliberately carries no `\r`.
+fn bracketed_paste(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() + 12);
+    out.extend_from_slice(b"\x1b[200~");
+    out.extend_from_slice(text.as_bytes());
+    out.extend_from_slice(b"\x1b[201~");
+    out
+}
+
+/// True once Claude Code has rendered an attached-image marker.
+///
+/// The TUI draws it with cursor positioning rather than a literal space —
+/// `[Image`, `ESC [10G`, `#1]` — so escapes and whitespace are both dropped
+/// before matching, leaving `[Image#1]`.
+fn image_attach_marker(bytes: &[u8]) -> bool {
+    let mut plain = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == 0x1b {
+            i += 1;
+            match bytes.get(i) {
+                // CSI: params/intermediates are all < 0x40, final byte is 0x40..=0x7e.
+                Some(b'[') => {
+                    i += 1;
+                    while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                // OSC: terminated by BEL or ST.
+                Some(b']') => {
+                    i += 1;
+                    while i < bytes.len() {
+                        if bytes[i] == 0x07 {
+                            i += 1;
+                            break;
+                        }
+                        if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'\\') {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                // Charset designation takes one more byte.
+                Some(b'(' | b')' | b'*' | b'+') => i += 2,
+                // Any other two-byte escape (ESC 7, ESC =, ESC >, ...).
+                Some(_) => i += 1,
+                None => break,
+            }
+            continue;
+        }
+        if b > 0x20 && b != 0x7f {
+            plain.push(b);
+        }
+        i += 1;
+    }
+    plain.windows(7).any(|w| w == b"[Image#")
+}
+
 fn chrono_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -306,4 +437,53 @@ fn spawn_reader_thread(handle: Arc<TerminalHandle>, mut reader: Box<dyn Read + S
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paste_frames_without_submitting() {
+        assert_eq!(
+            bracketed_paste("/tmp/a.png"),
+            b"\x1b[200~/tmp/a.png\x1b[201~".to_vec()
+        );
+        // No CR anywhere: Enter must be a separate, later write.
+        assert!(!bracketed_paste("/tmp/a.png").contains(&b'\r'));
+    }
+
+    #[test]
+    fn paste_keeps_spaces_and_multiple_paths_intact() {
+        let paths = "/Users/x/Application Support/app/images/c/a.png\n/tmp/b.png";
+        let framed = bracketed_paste(paths);
+        assert_eq!(&framed[6..framed.len() - 6], paths.as_bytes());
+    }
+
+    #[test]
+    fn marker_matches_real_claude_code_output() {
+        // Verbatim bytes captured from Claude Code 2.1.316 after a bracketed
+        // paste of an image path: the space in "[Image #1]" is a cursor move.
+        let raw = b"\x1b(B\x0f\x1b[?2004h\x1b[2D\x1b[3B\r\x1b[2C\x1b[3A[Image\x1b[10G#1]\x1b[7m \r\x1b[47C\x1b[2B\x1b[27m";
+        assert!(image_attach_marker(raw));
+    }
+
+    #[test]
+    fn marker_ignores_unrelated_output() {
+        assert!(!image_attach_marker(b"\x1b[?2004h\r\n hello world \x1b[0m"));
+        assert!(!image_attach_marker(b""));
+        // A truncated escape must not panic or run off the end.
+        assert!(!image_attach_marker(b"\x1b["));
+        assert!(!image_attach_marker(b"\x1b"));
+        assert!(!image_attach_marker(b"\x1b]0;title"));
+    }
+
+    #[test]
+    fn marker_matches_plain_and_later_numbering() {
+        // Whitespace is dropped too, so both the cursor-move form and a literal
+        // space render match.
+        assert!(image_attach_marker(b"[Image #1]"));
+        assert!(image_attach_marker(b"[Image#2]"));
+        assert!(image_attach_marker(b"prefix\x1b[2K[Image\x1b[10G#12]suffix"));
+    }
 }

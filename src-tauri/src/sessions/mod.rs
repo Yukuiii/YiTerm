@@ -202,7 +202,7 @@ pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
             if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
                 return Vec::new();
             }
-            // Array content = tool results (or other synthetic blocks).
+            // Array content = tool results, or a prompt that carried images.
             if let Some(blocks) = message.get("content").and_then(Value::as_array) {
                 let mut out = Vec::new();
                 for block in blocks {
@@ -237,7 +237,50 @@ pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
                         done: true,
                     });
                 }
-                return out;
+                if !out.is_empty() {
+                    return out;
+                }
+                // A prompt with pasted screenshots is stored as an array of
+                // text + image blocks (e.g. "[Image #1] Take a look"). It must
+                // surface as a user turn: unlike a plain-text prompt, the
+                // frontend's optimistic bubble is the only other copy, and it
+                // is not recreated from anywhere else. Claude Code also writes
+                // a model-facing echo of the same turn ("[Image: source: …]")
+                // that has no image block — that one is skipped.
+                let has_image = blocks
+                    .iter()
+                    .any(|b| b.get("type").and_then(Value::as_str) == Some("image"));
+                if !has_image {
+                    return Vec::new();
+                }
+                let text = blocks
+                    .iter()
+                    .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|b| b.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let mut text = text.trim().to_string();
+                // An image-only prompt may carry no text block at all; keep a
+                // marker so the turn still reaches the mirror.
+                if text.is_empty() {
+                    text = "[Image #1]".to_string();
+                }
+                let Some(key) = v.get("uuid").and_then(Value::as_str) else {
+                    return Vec::new();
+                };
+                if SKIP_USER_PREFIXES.iter().any(|p| text.starts_with(p)) {
+                    return Vec::new();
+                }
+                return vec![ChatMsg {
+                    key: key.to_string(),
+                    role: Role::User,
+                    text: text.to_string(),
+                    thinking: None,
+                    tool_calls: Vec::new(),
+                    tool_result: None,
+                    ts,
+                    done: true,
+                }];
             }
             // String content = a real prompt.
             let Some(raw) = message.get("content").and_then(Value::as_str) else {
@@ -404,6 +447,55 @@ mod tests {
         assert_eq!(m.key, "u1");
         assert_eq!(m.text, "你好，请看一下这个目录");
         assert!(m.done);
+    }
+
+    #[test]
+    fn parses_image_prompt_array_content() {
+        // A prompt with a pasted screenshot: text + image blocks, not a string.
+        let v = json!({
+            "type": "user", "uuid": "u-img",
+            "timestamp": "2026-11-07T20:22:13Z",
+            "promptSource": "typed",
+            "imagePasteIds": [1],
+            "message": { "role": "user", "content": [
+                { "type": "text", "text": "[Image #1] Take a look" },
+                { "type": "image", "source": { "type": "base64",
+                  "media_type": "image/png", "data": "AAAA" } }
+            ] }
+        });
+        let msgs = parse_line(&v);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::User);
+        assert_eq!(msgs[0].key, "u-img");
+        assert_eq!(msgs[0].text, "[Image #1] Take a look");
+        assert!(msgs[0].tool_result.is_none());
+    }
+
+    #[test]
+    fn image_only_prompt_still_surfaces() {
+        let v = json!({
+            "type": "user", "uuid": "u-img2",
+            "message": { "role": "user", "content": [
+                { "type": "image", "source": { "type": "base64",
+                  "media_type": "image/png", "data": "AAAA" } }
+            ] }
+        });
+        let msgs = parse_line(&v);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text, "[Image #1]");
+    }
+
+    #[test]
+    fn skips_model_facing_image_echo() {
+        // The same turn is written again in model-facing form, with no image
+        // block. Parsing it too would duplicate the user bubble.
+        let v = json!({
+            "type": "user", "uuid": "u-echo",
+            "message": { "role": "user", "content": [
+                { "type": "text", "text": "[Image: source: /tmp/a.png]" }
+            ] }
+        });
+        assert!(parse_line(&v).is_empty());
     }
 
     #[test]
