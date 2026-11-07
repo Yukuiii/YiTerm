@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import type { Msg } from '../stores/chat';
+import { oneLine } from '../format';
 import Markdown from './Markdown';
+import { ChevronIcon, CodeIcon, SparkleIcon, TerminalIcon } from './Icons';
 
 export default function MessageBubble({
   msg,
@@ -20,37 +22,61 @@ export default function MessageBubble({
   // A translation that equals the source (e.g. assistant already wrote Chinese)
   // has no useful original toggle.
   const hasDistinctOriginal = !isUser && !!msg.translation && msg.translation !== msg.original;
+  const thinking = msg.thinking?.trim() ?? '';
 
   return (
     <div className={`bubble-row ${isUser ? 'from-user' : 'from-ai'}`}>
       <div className={`bubble ${isUser ? 'user' : 'ai'}`}>
+        {thinking && (
+          <details className="thinking-line">
+            <summary>
+              <span className="step-icon"><SparkleIcon size={14} /></span>
+              <span className="step-label" title={thinking}>{oneLine(thinking, 96)}</span>
+              <ChevronIcon size={13} className="step-chevron" />
+            </summary>
+            <div className="step-body">
+              <div className="thinking-body">{thinking}</div>
+            </div>
+          </details>
+        )}
+
         {msg.toolCalls.length > 0 && (
-          <div className="tool-list">
-            {msg.toolCalls.map((t) => (
-              <details key={t.id} className={`tool-item ${t.isError ? 'is-error' : ''}`}>
-                <summary>
-                  <span className="chip">{t.name}</span>
-                  <span className="tool-detail" title={t.detail}>{t.detail || '—'}</span>
-                  {t.result !== undefined && (
-                    <span className="tool-status">{t.isError ? '失败' : '✓'}</span>
-                  )}
-                </summary>
-                {t.result !== undefined ? (
-                  <pre className="tool-output">{t.result || '（无输出）'}</pre>
-                ) : (
-                  <div className="tool-pending">等待输出…</div>
-                )}
-              </details>
-            ))}
+          <div className="step-list">
+            {msg.toolCalls.map((t) => {
+              const StepIcon = t.name === 'Bash' ? TerminalIcon : CodeIcon;
+              const label = t.label || t.detail || t.name;
+              return (
+                <details key={t.id} className={`step-item ${t.isError ? 'is-error' : ''}`}>
+                  <summary>
+                    <span className="step-icon"><StepIcon size={14} /></span>
+                    <span className="step-label" title={t.detail || t.name}>{label}</span>
+                    {t.result !== undefined && (
+                      <span className="step-status">{t.isError ? '失败' : '✓'}</span>
+                    )}
+                    <ChevronIcon size={13} className="step-chevron" />
+                  </summary>
+                  <div className="step-body">
+                    {t.detail && <pre className="step-command">{t.detail}</pre>}
+                    {t.result !== undefined ? (
+                      <pre className="step-output">{t.result || '（无输出）'}</pre>
+                    ) : (
+                      <div className="step-pending">等待输出…</div>
+                    )}
+                  </div>
+                </details>
+              );
+            })}
           </div>
         )}
+
         <div className="bubble-text">
           {primary.trim() ? (
             isUser ? primary : <Markdown>{primary}</Markdown>
-          ) : msg.toolCalls.length === 0 ? (
+          ) : msg.toolCalls.length === 0 && !thinking ? (
             <span className="bubble-placeholder">（思考中…）</span>
           ) : null}
         </div>
+
         {msg.working && <div className="bubble-working">翻译中…</div>}
         {msg.error && (
           <div className="bubble-error">
@@ -73,12 +99,6 @@ export default function MessageBubble({
           <div className="bubble-secondary">
             <Markdown>{msg.original}</Markdown>
           </div>
-        )}
-        {msg.thinking && (
-          <details className="thinking">
-            <summary>思考过程</summary>
-            <pre>{msg.thinking}</pre>
-          </details>
         )}
       </div>
     </div>

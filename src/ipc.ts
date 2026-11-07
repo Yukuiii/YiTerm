@@ -30,6 +30,8 @@ export type Direction = 'zh-en' | 'en-zh';
 export interface ToolCall {
   id: string;
   name: string;
+  /** Human-readable one-line label (falls back to detail for old caches). */
+  label?: string;
   detail: string;
 }
 

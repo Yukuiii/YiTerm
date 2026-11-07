@@ -34,7 +34,9 @@ pub enum Role {
 pub struct ToolCall {
     pub id: String,
     pub name: String,
-    /// Short human summary of the input (command, path, pattern, …).
+    /// Human-readable one-line label (the tool's `description` when present).
+    pub label: String,
+    /// Short technical summary of the input (command, path, pattern, …).
     pub detail: String,
 }
 
@@ -67,7 +69,39 @@ pub struct ChatMsg {
 }
 
 const TOOL_DETAIL_MAX: usize = 200;
+const TOOL_LABEL_MAX: usize = 80;
 const TOOL_RESULT_MAX: usize = 4000;
+
+fn truncate_label(s: &str, max: usize) -> String {
+    let one_line = s.replace('\n', " ");
+    let one_line = one_line.trim();
+    if one_line.chars().count() <= max {
+        one_line.to_string()
+    } else {
+        let mut out: String = one_line.chars().take(max).collect();
+        out.push('…');
+        out
+    }
+}
+
+/// One-line label for the step list: prefer the tool's human `description`,
+/// then the most meaningful input (command/path/pattern), then the tool name.
+fn summarize_tool_label(input: Option<&Value>, name: &str) -> String {
+    if let Some(obj) = input.and_then(Value::as_object) {
+        if let Some(desc) = obj.get("description").and_then(Value::as_str) {
+            let desc = desc.trim();
+            if !desc.is_empty() {
+                return truncate_label(desc, TOOL_LABEL_MAX);
+            }
+        }
+    }
+    let detail = summarize_tool_input(input);
+    if detail.trim().is_empty() {
+        name.to_string()
+    } else {
+        truncate_label(&detail, TOOL_LABEL_MAX)
+    }
+}
 
 fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -271,8 +305,9 @@ pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
                                 .to_string();
                             tool_calls.push(ToolCall {
                                 id,
-                                name,
+                                label: summarize_tool_label(block.get("input"), &name),
                                 detail: summarize_tool_input(block.get("input")),
+                                name,
                             });
                         }
                         _ => {}
@@ -441,6 +476,7 @@ mod tests {
         assert_eq!(m.tool_calls.len(), 1);
         assert_eq!(m.tool_calls[0].id, "call_9");
         assert_eq!(m.tool_calls[0].name, "Bash");
+        assert_eq!(m.tool_calls[0].label, "ls -la && echo hi");
         assert_eq!(m.tool_calls[0].detail, "ls -la && echo hi");
         assert!(m.done);
     }
@@ -453,6 +489,28 @@ mod tests {
         );
         assert!(summarize_tool_input(Some(&json!({ "weird_key": 42 }))).contains("weird_key"));
         assert_eq!(summarize_tool_input(None), "");
+    }
+
+    #[test]
+    fn tool_label_prefers_description() {
+        let v = json!({
+            "type": "assistant", "uuid": "a2",
+            "message": {
+                "id": "msg_2",
+                "content": [{
+                    "type": "tool_use", "id": "call_x", "name": "Bash",
+                    "input": {
+                        "command": "git status --short",
+                        "description": "检查仓库状态"
+                    }
+                }]
+            }
+        });
+        let msgs = parse_line(&v);
+        let t = &msgs[0].tool_calls[0];
+        assert_eq!(t.label, "检查仓库状态");
+        assert_eq!(t.detail, "git status --short");
+        assert_eq!(summarize_tool_label(None, "Bash"), "Bash");
     }
 
     #[test]

@@ -632,86 +632,108 @@ button, input, textarea { font-family: inherit; }
 }
 .err-actions button:hover { border-color: #4a4a4a; color: #fff; }
 
-.tool-list {
+.step-list {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 1px;
   margin-bottom: 8px;
 }
 
-.tool-item {
-  background: #141414;
-  border: 1px solid #282828;
-  border-radius: 9px;
-  overflow: hidden;
-}
-.tool-item.is-error { border-color: rgba(224, 112, 112, 0.45); }
+.thinking-line { margin-bottom: 2px; }
 
-.tool-item summary {
+.step-item,
+.thinking-line {
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+}
+
+.step-item summary,
+.thinking-line summary {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
+  padding: 5px 7px;
   list-style: none;
   cursor: pointer;
-  font-size: 12px;
+  border-radius: 7px;
+  color: #b9b9b9;
+  font-size: 12.5px;
+  transition: background 0.12s ease, color 0.12s ease;
 }
-.tool-item summary::-webkit-details-marker { display: none; }
-.tool-item summary::before {
-  content: '▸';
-  color: var(--fg-faint);
-  font-size: 10px;
-  flex: none;
-}
-.tool-item[open] summary::before { content: '▾'; }
+.step-item summary::-webkit-details-marker,
+.thinking-line summary::-webkit-details-marker { display: none; }
+.step-item summary:hover,
+.thinking-line summary:hover { background: #1a1a1a; color: #e8e8e8; }
+.step-item[open] > summary,
+.thinking-line[open] > summary { color: #e0e0e0; }
 
-.tool-detail {
+.step-icon {
+  flex: none;
+  display: inline-flex;
+  color: #8f8f8f;
+}
+.thinking-line .step-icon { color: #9a9a9a; }
+.step-item.is-error .step-icon { color: var(--danger); }
+
+.step-label {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--fg-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
 }
 
-.tool-status { flex: none; font-size: 10.5px; color: var(--ok); }
-.tool-item.is-error .tool-status { color: var(--danger); }
+.step-status { flex: none; font-size: 10.5px; color: var(--ok); }
+.step-item.is-error .step-status { color: var(--danger); }
 
-.tool-output {
-  margin: 0;
+.step-chevron {
+  flex: none;
+  color: #777777;
+  transition: transform 0.14s ease;
+}
+.step-item[open] > summary .step-chevron,
+.thinking-line[open] > summary .step-chevron { transform: rotate(90deg); }
+
+.step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 2px 0 7px 25px;
   padding: 8px 10px;
-  max-height: 260px;
-  overflow-y: auto;
   background: #101010;
-  border-top: 1px solid #282828;
+  border: 1px solid #282828;
+  border-radius: 8px;
+}
+
+.step-command,
+.step-output {
+  margin: 0;
+  font-family: ui-monospace, 'Ioskeley Mono Term', SFMono-Regular, Menlo, monospace;
   font-size: 11.5px;
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
 }
-.tool-item.is-error .tool-output { color: #ffb3b3; }
-
-.tool-pending {
-  padding: 6px 10px;
-  border-top: 1px solid #282828;
-  color: var(--fg-faint);
-  font-size: 11px;
+.step-command { color: #a9b4c2; }
+.step-output {
+  max-height: 260px;
+  overflow-y: auto;
+  color: #c9c9c9;
 }
+.step-item.is-error .step-output { color: #ffb3b3; }
 
-.chip {
-  flex: none;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: rgba(87, 201, 139, 0.1);
-  border: 1px solid rgba(87, 201, 139, 0.28);
-  color: var(--ok);
-  font-size: 10.5px;
+.step-pending { color: var(--fg-faint); font-size: 11px; }
+
+.thinking-body {
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #a9a9a9;
 }
 
 .toggle-original {
-  padding: 5px 0 0;
+  padding: 6px 0 0;
   background: none;
   border: 0;
   color: var(--fg-faint);
@@ -719,19 +741,6 @@ button, input, textarea { font-family: inherit; }
   cursor: pointer;
 }
 .toggle-original:hover { color: #d8d8d8; }
-
-.thinking { margin-top: 6px; font-size: 12px; color: var(--fg-muted); }
-.thinking summary { cursor: pointer; font-size: 11px; }
-.thinking pre {
-  margin: 4px 0 0;
-  padding: 8px;
-  max-height: 200px;
-  overflow-y: auto;
-  background: #141414;
-  border-radius: 7px;
-  font-size: 11px;
-  white-space: pre-wrap;
-}
 
 /* ---------- composer ---------- */
 
