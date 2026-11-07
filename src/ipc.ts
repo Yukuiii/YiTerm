@@ -104,6 +104,8 @@ export const conversationsDelete = (id: string) =>
 export const debugLog = (message: string) =>
   invoke<void>('debug_log', { message }).catch(() => {});
 
+export const currentUser = () => invoke<string>('current_user');
+
 // ---------- chat history persistence ----------
 
 export const chatSave = (convId: string, data: string) =>

@@ -19,7 +19,9 @@
         "minHeight": 600,
         "resizable": true,
         "fullscreen": false,
-        "backgroundThrottling": "disabled"
+        "backgroundThrottling": "disabled",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {

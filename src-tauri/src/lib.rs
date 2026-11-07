@@ -32,6 +32,7 @@ pub fn run() {
             ipc::chat_save,
             ipc::chat_load,
             ipc::debug_log,
+            ipc::current_user,
             ipc::settings_get,
             ipc::settings_set,
             ipc::api_key_get,

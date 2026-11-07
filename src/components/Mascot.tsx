@@ -1,0 +1,58 @@
+/**
+ * Small pixel crab drawn with 1×1 rects on a 24×16 grid — the landing-screen
+ * companion mark. `shapeRendering="crispEdges"` keeps the pixels square.
+ */
+export default function Mascot() {
+  return (
+    <svg
+      className="mascot"
+      width="72"
+      height="48"
+      viewBox="0 0 24 16"
+      shapeRendering="crispEdges"
+      aria-hidden="true"
+    >
+      <g fill="#d8753f">
+        {/* claws */}
+        <rect x="4" y="6" width="1" height="2" />
+        <rect x="3" y="5" width="2" height="1" />
+        <rect x="2" y="6" width="1" height="2" />
+        <rect x="3" y="8" width="2" height="1" />
+        <rect x="19" y="6" width="1" height="2" />
+        <rect x="19" y="5" width="2" height="1" />
+        <rect x="21" y="6" width="1" height="2" />
+        <rect x="19" y="8" width="2" height="1" />
+        {/* shell */}
+        <rect x="5" y="6" width="13" height="5" />
+        <rect x="6" y="11" width="11" height="1" />
+      </g>
+      <g fill="#e8915f">
+        <rect x="8" y="4" width="7" height="1" />
+        <rect x="6" y="5" width="11" height="1" />
+      </g>
+      <g fill="#b05a2e">
+        <rect x="8" y="12" width="7" height="1" />
+        {/* legs */}
+        <rect x="5" y="13" width="1" height="1" />
+        <rect x="6" y="14" width="1" height="1" />
+        <rect x="8" y="13" width="1" height="1" />
+        <rect x="9" y="14" width="1" height="1" />
+        <rect x="18" y="13" width="1" height="1" />
+        <rect x="17" y="14" width="1" height="1" />
+        <rect x="15" y="13" width="1" height="1" />
+        <rect x="14" y="14" width="1" height="1" />
+      </g>
+      {/* eyes + mouth */}
+      <g fill="#16110d">
+        <rect x="8" y="7" width="1" height="1" />
+        <rect x="14" y="7" width="1" height="1" />
+        <rect x="11" y="9" width="2" height="1" />
+      </g>
+      {/* eye highlights */}
+      <g fill="#ffd9c2">
+        <rect x="8" y="7" width="1" height="1" opacity="0.25" />
+        <rect x="14" y="7" width="1" height="1" opacity="0.25" />
+      </g>
+    </svg>
+  );
+}

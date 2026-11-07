@@ -246,6 +246,14 @@ pub fn debug_log(message: String) {
     tracing::info!(target: "yiterm_frontend", "{message}");
 }
 
+/// Login name for the sidebar identity row.
+#[tauri::command]
+pub fn current_user() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "user".to_string())
+}
+
 // ---------- chat history persistence (opaque JSON owned by the frontend) ----------
 
 fn chat_path(app: &tauri::AppHandle, state: &AppState, conv_id: &str) -> Result<std::path::PathBuf, String> {

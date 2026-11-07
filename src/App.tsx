@@ -1,24 +1,57 @@
-import { useEffect, useState } from 'react';
+import {
+  Component,
+  useEffect,
+  useMemo,
+  useState,
+  type ErrorInfo,
+  type ReactNode,
+} from 'react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import { onSessionUpdate, terminalKill } from './ipc';
+import { revealItemInDir } from '@tauri-apps/plugin-opener';
+import { appConfigDir, appLogDir } from '@tauri-apps/api/path';
+import { currentUser, debugLog, onSessionUpdate, terminalKill, type Conversation } from './ipc';
 import { useChatStore } from './stores/chat';
 import { useConversationsStore } from './stores/conversations';
 import { useSettingsStore } from './stores/settings';
 import { useTerminalsStore } from './stores/terminals';
+import { useSessionTitles } from './hooks/useSessionTitles';
+import { folderName } from './format';
+import type { ViewMode } from './types';
+import Sidebar from './components/Sidebar';
+import NewSessionView from './components/NewSessionView';
 import ChatPanel from './components/ChatPanel';
 import TerminalPanel from './components/TerminalPanel';
 import SettingsPage from './components/SettingsPage';
+import { FolderIcon, TerminalIcon } from './components/Icons';
 import './App.css';
 
 export default function App() {
   const activeId = useConversationsStore((s) => s.activeId);
+  const conversations = useConversationsStore((s) => s.list);
   const loadConvs = useConversationsStore((s) => s.load);
+  const createConv = useConversationsStore((s) => s.create);
+  const removeConv = useConversationsStore((s) => s.remove);
+  const setActive = useConversationsStore((s) => s.setActive);
+  const settings = useSettingsStore((s) => s.settings);
   const loadSettings = useSettingsStore((s) => s.load);
+  const titles = useSessionTitles();
+  const terminalEntry = useTerminalsStore((s) => (activeId ? s.byConv[activeId] : undefined));
+  const exitCode = useTerminalsStore((s) =>
+    activeId ? (activeId in s.exited ? s.exited[activeId] : undefined) : undefined,
+  );
+
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    const saved = localStorage.getItem('yiterm.viewMode');
+    return saved === 'cowork' || saved === 'code' ? saved : 'code';
+  });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [newFolder, setNewFolder] = useState<string | null>(null);
+  const [userName, setUserName] = useState('user');
 
   useEffect(() => {
     void loadSettings();
     void loadConvs();
+    void currentUser().then(setUserName).catch(() => {});
     const un = onSessionUpdate((payload) => {
       useChatStore.getState().upsertFromSession(payload.conversationId, payload.upserts);
     });
@@ -26,6 +59,35 @@ export default function App() {
       void un.then((f) => f());
     };
   }, [loadConvs, loadSettings]);
+
+  useEffect(() => {
+    localStorage.setItem('yiterm.viewMode', viewMode);
+  }, [viewMode]);
+
+  // The terminal must run in both view modes (chat replies depend on it), so
+  // start it here rather than only when TerminalPanel mounts.
+  useEffect(() => {
+    if (!activeId) return;
+    void useTerminalsStore.getState().ensureStarted(activeId).catch(() => {});
+  }, [activeId]);
+
+  // Hydrate caches so sidebar labels can use the first user prompt.
+  useEffect(() => {
+    for (const c of conversations) void useChatStore.getState().hydrate(c.id);
+  }, [conversations]);
+
+  const recentFolders = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const c of conversations) {
+      if (seen.has(c.folder)) continue;
+      seen.add(c.folder);
+      out.push(c.folder);
+    }
+    return out;
+  }, [conversations]);
+
+  const effectiveNewFolder: string | null = newFolder ?? recentFolders[0] ?? null;
 
   // Draggable chat/terminal splitter.
   useEffect(() => {
@@ -41,11 +103,13 @@ export default function App() {
       const panes = el.parentElement;
       if (!panes) return;
       const rect = panes.getBoundingClientRect();
-      const ratio = (e.clientY - rect.top) / rect.height;
-      const clamped = Math.min(Math.max(ratio, 0.15), 0.85);
+      const ratio = (e.clientX - rect.left) / rect.width;
+      const clamped = Math.min(Math.max(ratio, 0.2), 0.8);
       panes.style.setProperty('--chat-size', `${(clamped * 100).toFixed(1)}%`);
     };
-    const onUp = () => { dragging = false; };
+    const onUp = () => {
+      dragging = false;
+    };
     el.addEventListener('mousedown', onDown);
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
@@ -54,88 +118,231 @@ export default function App() {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [activeId]);
+  }, [activeId, viewMode]);
+
+  const activeConv = conversations.find((c) => c.id === activeId) ?? null;
+  const headerTitle = activeConv ? (titles[activeConv.id] ?? activeConv.title ?? '会话') : '新建会话';
+  const statusFolder = activeConv?.folder ?? effectiveNewFolder;
+  const translationLabel =
+    settings?.translation.mode === 'chat'
+      ? settings.translation.chatModelId
+        ? `Chat · ${settings.translation.chatModelId}`
+        : 'Chat 翻译'
+      : 'Google 翻译';
+  const statusKind = !activeId
+    ? 'idle'
+    : exitCode !== undefined
+      ? 'error'
+      : terminalEntry
+        ? 'ok'
+        : 'idle';
+
+  const pickFolder = async (): Promise<string | null> => {
+    try {
+      const folder = await openDialog({ directory: true, multiple: false });
+      return typeof folder === 'string' ? folder : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const handleNew = async () => {
+    const folder = await pickFolder();
+    if (!folder) return;
+    try {
+      await createConv(folder);
+    } catch (e) {
+      console.error('create conversation failed:', e);
+    }
+  };
+
+  const handleCreateInFolder = (folder: string) => {
+    void createConv(folder).catch((e) => console.error('create conversation failed:', e));
+  };
+
+  const handleDelete = (conv: Conversation) => {
+    const term = useTerminalsStore.getState().byConv[conv.id];
+    if (term) void terminalKill(term.terminalId);
+    useTerminalsStore.getState().drop(conv.id);
+    useChatStore.getState().clearConv(conv.id);
+    void removeConv(conv.id).catch((e) => console.error('delete conversation failed:', e));
+  };
+
+  const handlePickNewFolder = () => {
+    void pickFolder().then((folder) => {
+      if (folder) setNewFolder(folder);
+    });
+  };
+
+  const handleStartEmpty = async () => {
+    let folder: string | null = effectiveNewFolder;
+    if (!folder) {
+      folder = await pickFolder();
+      if (folder) setNewFolder(folder);
+    }
+    if (!folder) return;
+    try {
+      await createConv(folder);
+    } catch (e) {
+      console.error('create conversation failed:', e);
+    }
+  };
+
+  const handlePrompt = async (text: string) => {
+    if (!effectiveNewFolder) throw new Error('请先选择一个项目文件夹');
+    const conv = await createConv(effectiveNewFolder);
+    useChatStore.getState().queuePrompt(conv.id, text);
+  };
+
+  const revealFolder = (folder: string) => {
+    void revealItemInDir(folder).catch(() => {});
+  };
+
+  const handleRevealConfigDir = () => {
+    void appConfigDir()
+      .then((p) => revealItemInDir(p))
+      .catch(() => {});
+  };
+
+  const handleRevealLogsDir = () => {
+    void appLogDir()
+      .then((p) => revealItemInDir(p))
+      .catch(() => {});
+  };
 
   return (
     <div className="app">
-      <aside className="sidebar">
-        <div className="sidebar-head">
-          <span className="logo">YiTerm</span>
-          <button className="icon-btn" title="设置" onClick={() => setSettingsOpen(true)}>
-            ⚙
-          </button>
-        </div>
-        <ConversationList />
-      </aside>
+      <SidebarBoundary>
+        <Sidebar
+          conversations={conversations}
+          activeId={activeId}
+          titles={titles}
+          mode={viewMode}
+          userName={userName}
+          onModeChange={setViewMode}
+          onNew={() => void handleNew()}
+          onOpenSettings={() => setSettingsOpen(true)}
+          onCreateInFolder={handleCreateInFolder}
+          onSelect={setActive}
+          onDelete={handleDelete}
+          onRevealConfig={handleRevealConfigDir}
+          onRevealLogs={handleRevealLogsDir}
+        />
+      </SidebarBoundary>
+
       <main className="main">
-        {activeId ? (
-          <div className="panes">
-            <div className="pane pane-chat">
-              <ChatPanel convId={activeId} />
-            </div>
-            <div className="splitter" id="pane-splitter" />
-            <div className="pane pane-term">
-              <TerminalPanel convId={activeId} />
-            </div>
+        <header className="main-head" data-tauri-drag-region>
+          <div className="main-title" data-tauri-drag-region>
+            {headerTitle}
           </div>
-        ) : (
-          <div className="empty">新建一个会话开始使用</div>
-        )}
+          <div className="main-actions">
+            <button
+              className={`icon-btn ${viewMode === 'code' ? 'active' : ''}`}
+              title={viewMode === 'code' ? '隐藏终端' : '显示终端'}
+              onClick={() => setViewMode(viewMode === 'code' ? 'cowork' : 'code')}
+            >
+              <TerminalIcon size={17} />
+            </button>
+            <button
+              className="icon-btn"
+              title={activeConv ? '在访达中显示项目文件夹' : '选择项目文件夹'}
+              onClick={() => {
+                if (activeConv) revealFolder(activeConv.folder);
+                else handlePickNewFolder();
+              }}
+            >
+              <FolderIcon size={17} />
+            </button>
+          </div>
+        </header>
+
+        <div className="main-body">
+          {activeId ? (
+            <div className={`session ${viewMode}`}>
+              <div className="pane pane-chat">
+                <ChatPanel convId={activeId} />
+              </div>
+              {viewMode === 'code' && (
+                <>
+                  <div className="splitter" id="pane-splitter" />
+                  <div className="pane pane-term">
+                    <TerminalPanel convId={activeId} />
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            <NewSessionView
+              folders={recentFolders}
+              selectedFolder={effectiveNewFolder}
+              onSelectFolder={setNewFolder}
+              onPickFolder={handlePickNewFolder}
+              onStartEmpty={handleStartEmpty}
+              onOpenSettings={() => setSettingsOpen(true)}
+              onPrompt={handlePrompt}
+            />
+          )}
+        </div>
+
+        <footer className="statusbar">
+          <div className="status-left">
+            <button
+              className="status-folder-btn"
+              title={statusFolder ?? '选择项目文件夹'}
+              onClick={() => (statusFolder ? revealFolder(statusFolder) : handlePickNewFolder())}
+            >
+              <FolderIcon size={13} />
+              <span className="status-folder">
+                {statusFolder ? folderName(statusFolder) : '未选择项目'}
+              </span>
+            </button>
+          </div>
+          <div className="status-right">
+            <span className="status-item">{translationLabel}</span>
+            <span className="status-item">Claude Code</span>
+            <span
+              className={`status-dot ${statusKind}`}
+              title={
+                statusKind === 'ok' ? '终端运行中' : statusKind === 'error' ? '终端已退出' : '终端未启动'
+              }
+            />
+          </div>
+        </footer>
       </main>
+
       {settingsOpen && <SettingsPage onClose={() => setSettingsOpen(false)} />}
     </div>
   );
 }
 
-function ConversationList() {
-  const { list, activeId, create, remove, setActive, loading } = useConversationsStore();
-  const [creating, setCreating] = useState(false);
+/**
+ * Keeps a failed sidebar from silently disappearing (and from expanding the
+ * main pane): logs the stack to the backend log and offers a retry.
+ */
+class SidebarBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state: { failed: boolean } = { failed: false };
 
-  const handleNew = async () => {
-    try {
-      const folder = await openDialog({ directory: true, multiple: false });
-      if (typeof folder === 'string') {
-        setCreating(true);
-        await create(folder);
-      }
-    } finally {
-      setCreating(false);
-    }
-  };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
 
-  return (
-    <div className="conv-list">
-      <button className="new-conv" onClick={handleNew} disabled={creating}>
-        {creating ? '创建中…' : '＋ 新会话'}
-      </button>
-      {loading && <div className="conv-hint">加载中…</div>}
-      {list.map((c) => (
-        <div
-          key={c.id}
-          className={`conv-item ${c.id === activeId ? 'active' : ''}`}
-          onClick={() => setActive(c.id)}
-        >
-          <div className="conv-title">{c.title ?? c.folder}</div>
-          <div className="conv-folder" title={c.folder}>{c.folder}</div>
-          <button
-            className="conv-del"
-            title="删除会话"
-            onClick={async (e) => {
-              e.stopPropagation();
-              const term = useTerminalsStore.getState().byConv[c.id];
-              if (term) void terminalKill(term.terminalId);
-              useTerminalsStore.getState().drop(c.id);
-              useChatStore.getState().clearConv(c.id);
-              await remove(c.id);
-            }}
-          >
-            ×
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    void debugLog(
+      `sidebar render error: ${error.message}\n${info.componentStack ?? ''}\n${error.stack ?? ''}`,
+    );
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <aside className="sidebar sidebar-failed">
+          <div className="side-empty">侧边栏加载出错</div>
+          <button className="new-session-btn" onClick={() => this.setState({ failed: false })}>
+            重试
           </button>
-        </div>
-      ))}
-      {!loading && list.length === 0 && (
-        <div className="conv-hint">选择一个项目文件夹<br />创建第一个会话</div>
-      )}
-    </div>
-  );
+        </aside>
+      );
+    }
+    return this.props.children;
+  }
 }

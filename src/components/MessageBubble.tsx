@@ -17,6 +17,9 @@ export default function MessageBubble({
   // Primary display: user → 中文原文; assistant → 中文译文（无译文时显示英文原文）
   const primary = isUser ? msg.original : (msg.translation ?? msg.original);
   const secondary = isUser ? msg.translation : msg.original;
+  // A translation that equals the source (e.g. assistant already wrote Chinese)
+  // has no useful original toggle.
+  const hasDistinctOriginal = !isUser && !!msg.translation && msg.translation !== msg.original;
 
   return (
     <div className={`bubble-row ${isUser ? 'from-user' : 'from-ai'}`}>
@@ -58,10 +61,10 @@ export default function MessageBubble({
             </div>
           </div>
         )}
-        {isUser && secondary && !msg.error && (
+        {isUser && secondary && secondary !== msg.original && !msg.error && (
           <div className="bubble-secondary" title="英文译文">{secondary}</div>
         )}
-        {!isUser && !msg.error && (
+        {hasDistinctOriginal && !msg.error && (
           <button className="toggle-original" onClick={() => setShowOriginal(!showOriginal)}>
             {showOriginal ? '隐藏原文' : '显示原文'}
           </button>

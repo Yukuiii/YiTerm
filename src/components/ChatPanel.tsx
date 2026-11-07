@@ -1,19 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
+import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { hasCJK, terminalWrite } from '../ipc';
 import { useChatStore } from '../stores/chat';
 import { useConversationsStore } from '../stores/conversations';
 import { useTerminalsStore } from '../stores/terminals';
 import MessageBubble from './MessageBubble';
+import { ArrowUpIcon, FolderIcon } from './Icons';
 
 export default function ChatPanel({ convId }: { convId: string }) {
   const msgs = useChatStore((s) => s.byConv[convId]) ?? [];
   const conv = useConversationsStore((s) => s.list.find((c) => c.id === convId));
   const terminal = useTerminalsStore((s) => s.byConv[convId]);
   const exited = useTerminalsStore((s) => (convId in s.exited ? s.exited[convId] : undefined));
+  const pending = useChatStore((s) => s.pendingPrompts[convId]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
 
   const flashNotice = (text: string) => {
     setNotice(text);
@@ -24,12 +27,16 @@ export default function ChatPanel({ convId }: { convId: string }) {
     void useChatStore.getState().hydrate(convId);
   }, [convId]);
 
+  const lastMsg = msgs[msgs.length - 1];
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [msgs.length, msgs[msgs.length - 1]?.translation]);
+    // Scroll only the message list. `scrollIntoView` also scrolls the document
+    // (including horizontally), which could shift the sidebar out of view.
+    const el = messagesRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+  }, [msgs.length, lastMsg?.translation, lastMsg?.original]);
 
-  const send = async () => {
-    const text = input.trim();
+  const send = async (override?: string) => {
+    const text = (override ?? input).trim();
     if (!text || sending) return;
     const termId = terminal?.terminalId;
     if (exited !== undefined) {
@@ -40,7 +47,7 @@ export default function ChatPanel({ convId }: { convId: string }) {
       flashNotice('终端正在启动，请稍候…');
       return;
     }
-    setInput('');
+    if (override === undefined) setInput('');
     setSending(true);
     const store = useChatStore.getState();
     try {
@@ -67,6 +74,15 @@ export default function ChatPanel({ convId }: { convId: string }) {
     }
   };
 
+  // Prompt submitted from the landing screen: wait until the PTY exists.
+  useEffect(() => {
+    if (!pending || exited !== undefined) return;
+    if (terminal?.terminalId === undefined) return;
+    const text = useChatStore.getState().takePrompt(convId);
+    if (text) void send(text);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending, terminal?.terminalId, exited, convId]);
+
   const sendAsIs = async (key: string, original: string) => {
     const termId = terminal?.terminalId;
     if (termId === undefined) return;
@@ -89,16 +105,11 @@ export default function ChatPanel({ convId }: { convId: string }) {
 
   return (
     <div className="chat-panel">
-      <div className="panel-head">
-        <span className="panel-title">{conv?.title ?? '会话'}</span>
-        {exited !== undefined && (
-          <span className="term-status exited">终端已退出{exited !== null ? ` (${exited})` : ''}</span>
-        )}
-      </div>
-      <div className="messages">
+      <div className="messages" ref={messagesRef}>
         {msgs.length === 0 && (
           <div className="msg-empty">
-            用中文输入需求，会自动翻译成英文发送给 Claude Code；<br />
+            用中文输入需求，会自动翻译成英文发送给 Claude Code；
+            <br />
             Claude 的英文回复会自动翻译成中文显示。
           </div>
         )}
@@ -110,25 +121,42 @@ export default function ChatPanel({ convId }: { convId: string }) {
             onSendAsIs={() => void sendAsIs(m.key, m.original)}
           />
         ))}
-        <div ref={bottomRef} />
       </div>
+
       {notice && <div className="composer-notice">{notice}</div>}
-      <div className="composer">
-        <textarea
-          value={input}
-          placeholder={exited !== undefined ? '终端已退出' : '输入中文（Enter 发送，Shift+Enter 换行）'}
-          disabled={exited !== undefined}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              void send();
-            }
-          }}
-        />
-        <button className="send-btn" onClick={() => void send()} disabled={sending || !input.trim()}>
-          发送
-        </button>
+
+      <div className="composer-wrap">
+        <div className="composer">
+          <button
+            className="composer-icon-btn"
+            title="在访达中显示项目文件夹"
+            onClick={() => {
+              if (conv) void revealItemInDir(conv.folder).catch(() => {});
+            }}
+          >
+            <FolderIcon size={17} />
+          </button>
+          <textarea
+            value={input}
+            placeholder={exited !== undefined ? '终端已退出' : '输入中文（Enter 发送，Shift+Enter 换行）'}
+            disabled={exited !== undefined}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                void send();
+              }
+            }}
+          />
+          <button
+            className="send-btn"
+            title="发送"
+            onClick={() => void send()}
+            disabled={sending || !input.trim()}
+          >
+            <ArrowUpIcon size={16} />
+          </button>
+        </div>
       </div>
     </div>
   );

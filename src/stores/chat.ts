@@ -50,6 +50,13 @@ export interface Msg {
 
 interface ChatStore {
   byConv: Record<string, Msg[]>;
+  /**
+   * Prompt queued by the landing screen before the conversation's terminal is
+   * ready; consumed by ChatPanel once it can write to the PTY.
+   */
+  pendingPrompts: Record<string, string>;
+  queuePrompt: (convId: string, text: string) => void;
+  takePrompt: (convId: string) => string | null;
   /** Loads persisted history once per conversation (no-op if already in memory). */
   hydrate: (convId: string) => Promise<void>;
   addOptimistic: (convId: string, text: string) => string;
@@ -107,6 +114,22 @@ function updateMsg(byConv: Record<string, Msg[]>, convId: string, key: string, f
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   byConv: {},
+  pendingPrompts: {},
+
+  queuePrompt: (convId, text) =>
+    set((s) => ({ pendingPrompts: { ...s.pendingPrompts, [convId]: text } })),
+
+  takePrompt: (convId) => {
+    const text = get().pendingPrompts[convId] ?? null;
+    if (text !== null) {
+      set((s) => {
+        const pendingPrompts = { ...s.pendingPrompts };
+        delete pendingPrompts[convId];
+        return { pendingPrompts };
+      });
+    }
+    return text;
+  },
 
   hydrate: async (convId) => {
     if (hydrated.has(convId)) return;

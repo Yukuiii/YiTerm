@@ -46,11 +46,13 @@ export default function TerminalPanel({ convId }: { convId: string }) {
       // 2. Build the xterm view.
       term = new Terminal({
         cursorBlink: true,
-        fontSize: 13,
+        fontSize: 12.5,
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
         theme: {
-          background: '#16181d',
-          foreground: '#d7dae0',
+          background: '#0c0c0c',
+          foreground: '#d7d7d7',
+          cursor: '#d7d7d7',
+          selectionBackground: 'rgba(255, 255, 255, 0.18)',
         },
         scrollback: 5000,
       });
@@ -107,15 +109,12 @@ export default function TerminalPanel({ convId }: { convId: string }) {
 
   return (
     <div className="term-panel">
-      <div className="panel-head">
-        <span className="panel-title">终端 · claude</span>
-        {exited !== undefined && (
-          <button className="restart-btn" onClick={restart} title="用 --resume 恢复此会话">
-            已退出 — 点击恢复
-          </button>
-        )}
-      </div>
       <div className="term-host" ref={hostRef} />
+      {exited !== undefined && (
+        <button className="restart-btn term-exit" onClick={restart} title="用 --resume 恢复此会话">
+          终端已退出{exited !== null ? ` (${exited})` : ''} — 点击恢复
+        </button>
+      )}
     </div>
   );
 }
