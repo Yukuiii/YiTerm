@@ -32,6 +32,9 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 
 - **Streaming translation** zh → en and en → zh
   - Google's free endpoints out of the box, or any OpenAI-compatible chat API
+  - **Fully offline local mode**: Tencent's Hy-MT2-1.8B runs on CPU inside the
+    app (no Ollama, no API key). The Q3_K_M model (~907 MB) downloads in the
+    background on first launch.
   - Fenced code and inline code are protected with sentinels so they survive translation
 - **Real terminal**, powered by `portable-pty` and xterm.js, with backlog replay on reattach
 - **Session mirror** from Claude Code's JSONL transcript
@@ -58,7 +61,7 @@ Claude Code is a great coding agent, but it works in English and its conversatio
                                 │ Tauri IPC / Channels
 ┌───────────────────────────────▼───────────────────────────────────┐
 │                           Rust backend                            │
-│  PTY (portable-pty) · JSONL follower · translate (Google / Chat)  │
+│  PTY (portable-pty) · JSONL follower · translate (Google/Chat/Local)│
 │  settings + Keychain · conversation and chat persistence          │
 └───────────────────────────────────────────────────────────────────┘
 ```
@@ -76,6 +79,7 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 - Rust 1.90+
 - [Claude Code](https://github.com/anthropics/claude-code) installed and authenticated (`claude`)
 - Network access to Google Translate endpoints or an OpenAI-compatible provider
+  (not needed in local mode after the model has been downloaded)
 
 ## Getting started
 
@@ -100,7 +104,11 @@ YiTerm auto-detects `claude` in `~/.local/bin` or on `PATH`. You can point it at
 
 ## Configuration
 
-- **Translation mode** — Google free endpoints (no key) or an OpenAI-compatible Chat API (Base URL, model, API key).
+- **Translation mode** — Google free endpoints (no key), an OpenAI-compatible Chat API (Base URL, model, API key), or the embedded Hy-MT2-1.8B model (offline, CPU-only).
+  The local model lives in `models/Hy-MT2-1.8B.Q3_K_M.gguf` under the app data
+  directory (`~/Library/Application Support/com.yiterm.app` on macOS,
+  `%LOCALAPPDATA%\com.yiterm.app` on Windows); a custom GGUF path can be set in
+  Settings.
 - **Target language** — replies are translated to Simplified Chinese (`zh-CN`).
 - **API key** — stored in the macOS Keychain, never in the repository.
 - **App data** — `~/Library/Application Support/com.yiterm.app/`

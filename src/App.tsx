@@ -156,7 +156,9 @@ export default function App() {
       ? settings.translation.chatModelId
         ? `Chat · ${settings.translation.chatModelId}`
         : 'Chat 翻译'
-      : 'Google 翻译';
+      : settings?.translation.mode === 'local'
+        ? '本地翻译 · Hy-MT2-1.8B'
+        : 'Google 翻译';
   const statusKind = !activeId
     ? 'idle'
     : exitCode !== undefined

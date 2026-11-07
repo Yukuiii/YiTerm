@@ -8,7 +8,8 @@ const KEYCHAIN_USER: &str = "chat-api-key";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranslationSettings {
-    /// "google" (built-in free endpoint) or "chat" (OpenAI-compatible).
+    /// "google" (built-in free endpoint), "chat" (OpenAI-compatible), or
+    /// "local" (embedded Hy-MT2-1.8B, offline).
     #[serde(default = "default_mode")]
     pub mode: String,
     /// Target language for the en→native direction.
@@ -16,6 +17,8 @@ pub struct TranslationSettings {
     pub target_zh: String,
     pub chat_base_url: Option<String>,
     pub chat_model_id: Option<String>,
+    /// Custom GGUF path for local mode; None → managed download location.
+    pub local_model_path: Option<String>,
 }
 
 fn default_mode() -> String {
@@ -33,6 +36,7 @@ impl Default for TranslationSettings {
             target_zh: default_target_zh(),
             chat_base_url: None,
             chat_model_id: None,
+            local_model_path: None,
         }
     }
 }

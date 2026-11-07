@@ -19,7 +19,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 portable-pty = "0.9"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs", "io-util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
@@ -34,3 +34,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 tauri-plugin-opener = "2.7.2"
+hy-mt-core = { path = "vendor/hy-mt-core" }

@@ -8,7 +8,11 @@ use std::{
 
 use tauri::Manager;
 
-use crate::{sessions::Conversation, settings::Settings};
+use crate::{
+    sessions::Conversation,
+    settings::Settings,
+    translate::local::{DownloadHandle, TranslatorHandle},
+};
 
 /// Shared application state managed by Tauri.
 pub struct AppState {
@@ -18,6 +22,10 @@ pub struct AppState {
     pub followers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     pub settings: RwLock<Settings>,
     pub http: reqwest::Client,
+    /// Lazily loaded local translation model (Hy-MT2-1.8B).
+    pub local: TranslatorHandle,
+    /// Background download progress/state for the model file.
+    pub model: DownloadHandle,
     next_terminal_id: AtomicU64,
 }
 
@@ -36,6 +44,8 @@ impl AppState {
             followers: Mutex::new(HashMap::new()),
             settings: RwLock::new(settings),
             http: build_http_client(),
+            local: Arc::new(tokio::sync::Mutex::new(None)),
+            model: Arc::new(Mutex::new(crate::translate::local::ModelDownload::default())),
             next_terminal_id: AtomicU64::new(1),
         }
     }
