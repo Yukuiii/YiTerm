@@ -83,6 +83,13 @@ export const terminalStart = (conversationId: string) =>
 export const terminalWrite = (id: number, text: string, submit: boolean) =>
   invoke<void>('terminal_write', { id, text, submit });
 
+/**
+ * Sends one composer turn. Image paths are pasted into Claude Code and given
+ * time to attach before Enter is pressed; the backend owns that sequencing.
+ */
+export const terminalSendPrompt = (id: number, text: string, imagePaths: string[] = []) =>
+  invoke<void>('terminal_send_prompt', { id, text, imagePaths });
+
 export const terminalAttach = (id: number, seq: number, channel: Channel<TerminalEvent>) =>
   invoke<void>('terminal_attach', { id, seq, channel });
 
@@ -115,6 +122,10 @@ export const chatSave = (convId: string, data: string) =>
 
 export const chatLoad = (convId: string) =>
   invoke<string | null>('chat_load', { convId });
+
+/** Persists a pasted image; returns the absolute path to hand to Claude Code. */
+export const chatImageSave = (convId: string, mime: string, data: string) =>
+  invoke<string>('chat_image_save', { convId, mime, data });
 
 // ---------- settings ----------
 
@@ -180,6 +191,17 @@ export function onSessionUpdate(cb: (payload: SessionUpdate) => void): Promise<U
 
 export function hasCJK(text: string): boolean {
   return /[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯ᄀ-ᇿ]/.test(text);
+}
+
+/** Base64-encodes bytes for the JSON IPC. Chunked: `String.fromCharCode(...bytes)`
+ *  overflows the argument limit on a multi-MB screenshot. */
+export function encodeBytesToBase64(bytes: Uint8Array): string {
+  const CHUNK = 0x8000;
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
 }
 
 export function decodeBase64ToBytes(b64: string): Uint8Array {

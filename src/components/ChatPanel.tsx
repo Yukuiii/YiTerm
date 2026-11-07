@@ -1,11 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
-import { hasCJK, terminalWrite } from '../ipc';
+import { chatImageSave, encodeBytesToBase64, hasCJK, terminalSendPrompt } from '../ipc';
 import { useChatStore } from '../stores/chat';
 import { useConversationsStore } from '../stores/conversations';
 import { useTerminalsStore } from '../stores/terminals';
 import MessageBubble from './MessageBubble';
-import { ArrowUpIcon, FolderIcon } from './Icons';
+import { ArrowUpIcon, FolderIcon, XIcon } from './Icons';
+
+interface PendingImage {
+  id: string;
+  path: string;
+}
 
 export default function ChatPanel({ convId }: { convId: string }) {
   const msgs = useChatStore((s) => s.byConv[convId]) ?? [];
@@ -16,7 +22,19 @@ export default function ChatPanel({ convId }: { convId: string }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [images, setImages] = useState<PendingImage[]>([]);
+  const [savingImages, setSavingImages] = useState(0);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // One row by default; grow with content up to the CSS max-height so the
+  // composer never reserves an empty second line (browser default is rows=2).
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [input]);
 
   const flashNotice = (text: string) => {
     setNotice(text);
@@ -35,9 +53,48 @@ export default function ChatPanel({ convId }: { convId: string }) {
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
   }, [msgs.length, lastMsg?.translation, lastMsg?.original]);
 
+  /** Persists clipboard images and adds a removable chip for each. */
+  const addPastedImages = async (files: File[]) => {
+    setSavingImages((n) => n + files.length);
+    for (const file of files) {
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const path = await chatImageSave(convId, file.type, encodeBytesToBase64(bytes));
+        setImages((prev) => [...prev, { id: crypto.randomUUID(), path }]);
+      } catch (e) {
+        flashNotice(`图片添加失败：${String(e)}`);
+      } finally {
+        setSavingImages((n) => n - 1);
+      }
+    }
+  };
+
+  const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    // WebKit exposes pasteboard images through `files` (it converts TIFF to
+    // PNG); `items` is the fallback. An empty type still goes to the backend,
+    // which sniffs the real content.
+    const files: File[] = Array.from(e.clipboardData.files).filter(
+      (f) => f.type === '' || f.type.startsWith('image/'),
+    );
+    if (files.length === 0) {
+      for (const item of Array.from(e.clipboardData.items)) {
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          const f = item.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+    }
+    if (files.length === 0) return; // plain-text paste: leave it to the textarea
+    e.preventDefault();
+    void addPastedImages(files);
+  };
+
   const send = async (override?: string) => {
     const text = (override ?? input).trim();
-    if (!text || sending) return;
+    // Only the composer's own images belong to this turn; `override` comes from
+    // the landing-screen prompt queue, which is text-only.
+    const paths = override === undefined ? images.map((i) => i.path) : [];
+    if ((!text && paths.length === 0) || sending || savingImages > 0) return;
     const termId = terminal?.terminalId;
     if (exited !== undefined) {
       flashNotice('终端已退出，无法发送');
@@ -47,20 +104,25 @@ export default function ChatPanel({ convId }: { convId: string }) {
       flashNotice('终端正在启动，请稍候…');
       return;
     }
-    if (override === undefined) setInput('');
+    // Clear before recording: from here the bubble owns the images, and a
+    // translation failure is recoverable through 重试翻译 / 照原文发送.
+    if (override === undefined) {
+      setInput('');
+      setImages([]);
+    }
     setSending(true);
     const store = useChatStore.getState();
     try {
       if (hasCJK(text)) {
-        const key = store.addOptimistic(convId, text);
+        const key = store.addOptimistic(convId, text, paths);
         const en = await store.translateOutbound(convId, key, text);
         // Record before writing: the JSONL line can land within milliseconds
         // of the write and reconcile relies on this text.
         useChatStore.getState().markSent(convId, key, en);
-        await terminalWrite(termId, en, true);
+        await terminalSendPrompt(termId, en, paths);
       } else {
-        store.addPlain(convId, text);
-        await terminalWrite(termId, text, true);
+        store.addPlain(convId, text, paths);
+        await terminalSendPrompt(termId, text, paths);
       }
     } catch (e) {
       // 翻译失败：原文已在气泡中，给出发送选项
@@ -86,8 +148,10 @@ export default function ChatPanel({ convId }: { convId: string }) {
   const sendAsIs = async (key: string, original: string) => {
     const termId = terminal?.terminalId;
     if (termId === undefined) return;
+    const m = (useChatStore.getState().byConv[convId] ?? []).find((x) => x.key === key);
     useChatStore.getState().setWorking(convId, key, false);
-    await terminalWrite(termId, original, true);
+    // A failed translation must not silently drop the screenshots.
+    await terminalSendPrompt(termId, original, m?.images ?? []);
   };
 
   const retryTranslate = async (key: string) => {
@@ -97,7 +161,7 @@ export default function ChatPanel({ convId }: { convId: string }) {
     try {
       const en = await useChatStore.getState().translateOutbound(convId, key, m.original);
       const termId = terminal?.terminalId;
-      if (termId !== undefined) await terminalWrite(termId, en, true);
+      if (termId !== undefined) await terminalSendPrompt(termId, en, m.images ?? []);
     } catch (e) {
       useChatStore.getState().setError(convId, key, String(e));
     }
@@ -126,6 +190,22 @@ export default function ChatPanel({ convId }: { convId: string }) {
       {notice && <div className="composer-notice">{notice}</div>}
 
       <div className="composer-wrap">
+        {images.length > 0 && (
+          <div className="composer-attachments">
+            {images.map((img) => (
+              <div className="attachment-chip" key={img.id}>
+                <img src={convertFileSrc(img.path)} alt="" />
+                <button
+                  className="attachment-remove"
+                  title="移除图片"
+                  onClick={() => setImages((prev) => prev.filter((x) => x.id !== img.id))}
+                >
+                  <XIcon size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="composer">
           <button
             className="composer-icon-btn"
@@ -137,10 +217,13 @@ export default function ChatPanel({ convId }: { convId: string }) {
             <FolderIcon size={17} />
           </button>
           <textarea
+            ref={inputRef}
             value={input}
+            rows={1}
             placeholder={exited !== undefined ? '终端已退出' : '输入中文（Enter 发送，Shift+Enter 换行）'}
             disabled={exited !== undefined}
             onChange={(e) => setInput(e.target.value)}
+            onPaste={onPaste}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
@@ -152,7 +235,7 @@ export default function ChatPanel({ convId }: { convId: string }) {
             className="send-btn"
             title="发送"
             onClick={() => void send()}
-            disabled={sending || !input.trim()}
+            disabled={sending || savingImages > 0 || (!input.trim() && images.length === 0)}
           >
             <ArrowUpIcon size={16} />
           </button>

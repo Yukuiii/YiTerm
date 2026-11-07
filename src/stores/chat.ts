@@ -46,6 +46,18 @@ export interface Msg {
    * `key` is the stable local id that in-flight translation callbacks use.
    */
   sessionKey?: string;
+  /**
+   * Absolute paths of screenshots pasted into the composer, persisted with the
+   * message so history can render thumbnails. The files live in the app cache
+   * and the OS may reclaim them, so rendering tolerates a missing file.
+   */
+  images?: string[];
+  /**
+   * Persisted counterpart of `images`: records that the turn had screenshots
+   * without keeping paths that will be dead after a restart, so history can
+   * still say "（图片）" instead of looking like an empty prompt.
+   */
+  hadImages?: boolean;
 }
 
 interface ChatStore {
@@ -59,8 +71,8 @@ interface ChatStore {
   takePrompt: (convId: string) => string | null;
   /** Loads persisted history once per conversation (no-op if already in memory). */
   hydrate: (convId: string) => Promise<void>;
-  addOptimistic: (convId: string, text: string) => string;
-  addPlain: (convId: string, text: string) => void;
+  addOptimistic: (convId: string, text: string, images?: string[]) => string;
+  addPlain: (convId: string, text: string, images?: string[]) => void;
   markSent: (convId: string, key: string, sentText: string) => void;
   upsertFromSession: (convId: string, msgs: ChatMsg[]) => void;
   appendDelta: (convId: string, key: string, delta: string) => void;
@@ -145,13 +157,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const live = s.byConv[convId] ?? [];
         const liveKeys = new Set(live.map((m) => m.key));
         const merged = [
-          ...saved.filter((m) => !liveKeys.has(m.key)).map((m) => ({
-            ...m,
-            // A crash mid-translation leaves working=true forever — settle it.
-            working: false,
-            // Older caches predate tool capture.
-            toolCalls: m.toolCalls ?? [],
-          })),
+          ...saved.filter((m) => !liveKeys.has(m.key)).map((m) => {
+            const restored: Msg = {
+              ...m,
+              // A crash mid-translation leaves working=true forever — settle it.
+              working: false,
+              // Older caches predate tool capture.
+              toolCalls: m.toolCalls ?? [],
+            };
+            return restored;
+          }),
           ...live,
         ];
         return { byConv: { ...s.byConv, [convId]: merged } };
@@ -161,26 +176,38 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  addOptimistic: (convId, text) => {
+  addOptimistic: (convId, text, images) => {
     const key = `local-${crypto.randomUUID()}`;
     const msg: Msg = {
       key, role: 'user', original: text, translation: null,
-      working: true, error: null, ts: null, thinking: null, toolCalls: [],
+      working: true, error: null,
+      // An image-bearing turn never reconciles with the transcript (its JSONL
+      // content is an array), so it needs its own timestamp now.
+      ts: images?.length ? new Date().toISOString() : null,
+      thinking: null, toolCalls: [],
+      images: images?.length ? images : undefined,
+      hadImages: images?.length ? true : undefined,
     };
     set((s) => ({ byConv: { ...s.byConv, [convId]: [...(s.byConv[convId] ?? []), msg] } }));
-    void debugLog(`addOptimistic conv=${convId} key=${key} len=${text.length}`);
+    if (images?.length) saveNow(convId);
+    void debugLog(`addOptimistic conv=${convId} key=${key} len=${text.length} img=${images?.length ?? 0}`);
     return key;
   },
 
   markSent: (convId, key, sentText) =>
     set((s) => ({ byConv: updateMsg(s.byConv, convId, key, (m) => ({ ...m, sentText })) })),
 
-  addPlain: (convId, text) => {
+  addPlain: (convId, text, images) => {
     const msg: Msg = {
       key: `local-${crypto.randomUUID()}`, role: 'user', original: text, translation: null,
-      working: false, error: null, ts: null, thinking: null, toolCalls: [], fromTerminal: true,
+      working: false, error: null,
+      ts: images?.length ? new Date().toISOString() : null,
+      thinking: null, toolCalls: [],
+      images: images?.length ? images : undefined,
+      hadImages: images?.length ? true : undefined,
     };
     set((s) => ({ byConv: { ...s.byConv, [convId]: [...(s.byConv[convId] ?? []), msg] } }));
+    if (images?.length) saveNow(convId);
   },
 
   upsertFromSession: (convId, msgs) => {
@@ -216,14 +243,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         // or matching en translation / original text). Keep `key` stable —
         // an in-flight outbound translation still addresses this bubble by it.
         const trimmed = m.text.trim();
-        const match = list.find(
-          (x) =>
-            x.role === 'user' &&
-            (x.sessionKey === m.key ||
-              x.sentText === trimmed ||
-              x.translation === trimmed ||
-              x.original.trim() === trimmed),
-        );
+        // When Claude Code cannot attach a pasted image it falls back to
+        // inserting the literal path as text, which arrives here as a
+        // string-content turn. Strip our own image paths (and any `[Image #N]`
+        // marker) so it reconciles instead of becoming a second bubble whose
+        // body is a filesystem path.
+        const match = list.find((x) => {
+          if (x.role !== 'user') return false;
+          if (x.sessionKey === m.key) return true;
+          if (x.sentText === trimmed || x.translation === trimmed || x.original.trim() === trimmed) {
+            return true;
+          }
+          if (!x.images?.length) return false;
+          let rest = trimmed;
+          for (const p of x.images) rest = rest.split(p).join(' ');
+          rest = rest.replace(/\[(?:Image|Pasted text) #\d+(?: \+\d+ lines)?\]/g, '').trim();
+          return rest !== trimmed && (x.sentText === rest || x.original.trim() === rest);
+        });
         if (match) {
           set((s) => ({ byConv: updateMsg(s.byConv, convId, match.key, (prev) => ({
             ...prev, sessionKey: m.key, ts: prev.ts ?? m.ts,
@@ -231,14 +267,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           continue;
         }
         if (list.some((x) => x.key === m.key)) continue; // already known
-        // Typed directly in the terminal → plain bubble.
+        // Rebuilding a turn we have no optimistic bubble for (e.g. an image
+        // turn restored from the transcript, or one typed in the terminal).
+        // Strip Claude Code's `[Image #N]` marker: the thumbnail itself is not
+        // persisted, so record that the turn had one and keep the caption.
+        const hadImages = /\[Image #\d+\]/.test(m.text);
+        const display = m.text.replace(/\[Image #\d+\]/g, '').replace(/\s+/g, ' ').trim();
         set((s) => ({
           byConv: {
             ...s.byConv,
             [convId]: [...(s.byConv[convId] ?? []), {
-              key: m.key, role: 'user', original: m.text, translation: null,
+              key: m.key, role: 'user', original: display, translation: null,
               working: false, error: null, ts: m.ts, thinking: null, toolCalls: [],
               fromTerminal: true, sessionKey: m.key,
+              hadImages: hadImages || undefined,
             } satisfies Msg],
           },
         }));
@@ -387,6 +429,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     return final;
   },
 }));
+
+/**
+ * Writes one conversation immediately instead of waiting for the debounce.
+ * Image-bearing turns need this: they are the only record of the attachment
+ * paths, so quitting inside the 500 ms window would lose the thumbnail.
+ */
+function saveNow(convId: string) {
+  const msgs = useChatStore.getState().byConv[convId];
+  if (!msgs) return;
+  const json = JSON.stringify(msgs);
+  lastSaved.set(convId, json);
+  void chatSave(convId, json).catch(() => lastSaved.delete(convId));
+}
 
 // Debounced persistence: streaming deltas fire very often, so only write the
 // conversations whose serialized form actually changed, at most ~2x/second.

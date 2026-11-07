@@ -23,6 +23,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ipc::terminal_start,
             ipc::terminal_write,
+            ipc::terminal_send_prompt,
             ipc::terminal_attach,
             ipc::terminal_resize,
             ipc::terminal_kill,
@@ -31,6 +32,7 @@ pub fn run() {
             ipc::conversations_delete,
             ipc::chat_save,
             ipc::chat_load,
+            ipc::chat_image_save,
             ipc::debug_log,
             ipc::current_user,
             ipc::settings_get,

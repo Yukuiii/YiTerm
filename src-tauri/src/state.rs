@@ -50,6 +50,15 @@ impl AppState {
             .expect("app config dir unavailable")
     }
 
+    /// `~/Library/Caches/<identifier>` — paste attachments live here. They are
+    /// disposable by definition (the OS may purge them), which is why history
+    /// rendering tolerates a missing file.
+    pub fn cache_dir(&self, app: &tauri::AppHandle) -> std::path::PathBuf {
+        app.path()
+            .app_cache_dir()
+            .expect("app cache dir unavailable")
+    }
+
     pub fn persist_conversations(&self, app: &tauri::AppHandle) {
         let dir = self.config_dir(app);
         let convs = self.convs.read().unwrap().clone();
