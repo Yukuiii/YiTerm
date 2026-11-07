@@ -1,32 +1,119 @@
-# React + TypeScript + Vite
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="src/assets/logo.svg">
+    <source media="(prefers-color-scheme: light)" srcset="src/assets/logo-light.svg">
+    <img src="src/assets/logo-light.svg" width="430" alt="YiTerm">
+  </picture>
+</p>
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+<p align="center">
+  <strong>Claude Code, in Chinese.</strong><br>
+  An unofficial bilingual macOS desktop shell for
+  <a href="https://github.com/anthropics/claude-code">Claude Code</a>.
+</p>
 
-Currently, two official plugins are available:
+<p align="center">
+  <img src="docs/preview.png" alt="YiTerm in Code mode: translated chat on the left, live Claude Code terminal on the right" width="100%">
+</p>
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+<p align="center">
+  <em>Code mode — translated chat on the left, the real Claude Code PTY on the right.</em>
+</p>
 
-## React Compiler
+## Why YiTerm
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Claude Code is a great coding agent, but it works in English and its conversation lives in a terminal and a JSONL transcript. YiTerm wraps the real CLI in a desktop app and adds a bilingual layer around it:
 
-## Expanding the Oxlint configuration
+- **Chinese in, English out** — your prompt is translated before it reaches Claude.
+- **English in, Chinese out** — assistant replies are followed from the session transcript and translated back as they arrive.
+- **Still the real CLI** — YiTerm runs `claude` in a PTY with your existing login, tools, permissions, and MCP setup. No API proxy, no second Claude client.
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+## Features
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+- **Streaming translation** zh → en and en → zh
+  - Google's free endpoints out of the box, or any OpenAI-compatible chat API
+  - Fenced code and inline code are protected with sentinels so they survive translation
+- **Real terminal**, powered by `portable-pty` and xterm.js, with backlog replay on reattach
+- **Session mirror** from Claude Code's JSONL transcript
+  - assistant text and thinking
+  - tool calls with compact input summaries
+  - tool results, errors, and collapsible output
+- **GitHub-flavoured Markdown**: tables, code blocks, lists; links open in the system browser
+- **Project-grouped sessions** with search and per-project “new session”
+- **Two layouts**: Code (chat + terminal) and Cowork (chat only)
+- **Persistence**: conversations, chat history, and translation settings
+- **API key in the macOS Keychain**
+- **System proxy detection** via `scutil`, so translation works behind a local proxy
+- **Plain-text logs** in `~/Library/Logs/com.yiterm.app/`
+
+## How it works
+
+```text
+┌────────────────────────────── React ──────────────────────────────┐
+│  chat mirror · translation client · xterm.js · project sidebar    │
+└───────────────────────────────┬───────────────────────────────────┘
+                                │ Tauri IPC / Channels
+┌───────────────────────────────▼───────────────────────────────────┐
+│                           Rust backend                            │
+│  PTY (portable-pty) · JSONL follower · translate (Google / Chat)  │
+│  settings + Keychain · conversation and chat persistence          │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+1. `terminal_start` spawns `claude --session-id <uuid>` (or `--resume <uuid>` when the transcript already exists) inside a PTY.
+2. Chinese text from the composer is translated zh → en and written to the terminal.
+3. A follower tails `~/.claude/projects/<munged-cwd>/<session-id>.jsonl` and emits parsed messages.
+4. Assistant messages are translated en → zh and streamed into the chat panel.
+5. Code spans are replaced with `@@C<n>@@` sentinels before translation and restored afterwards.
+
+## Requirements
+
+- macOS 12.3 or later
+- Node.js 22+
+- Rust 1.90+
+- [Claude Code](https://github.com/anthropics/claude-code) installed and authenticated (`claude`)
+- Network access to Google Translate endpoints or an OpenAI-compatible provider
+
+## Getting started
+
+```bash
+git clone git@github.com:Yukuiii/YiTerm.git
+cd YiTerm
+npm install
+npm run tauri dev
+```
+
+YiTerm auto-detects `claude` in `~/.local/bin` or on `PATH`. You can point it at another binary in **Settings**.
+
+### Scripts
+
+| Command | What it does |
+| --- | --- |
+| `npm run tauri dev` | Run the full desktop app with HMR |
+| `npm run dev` | Run only the Vite frontend |
+| `npm run tauri build` | Build the `.app` / `.dmg` bundle |
+| `npm run lint` | Run oxlint |
+| `cd src-tauri && cargo test` | Run the Rust unit tests |
+
+## Configuration
+
+- **Translation mode** — Google free endpoints (no key) or an OpenAI-compatible Chat API (Base URL, model, API key).
+- **Target language** — replies are translated to Simplified Chinese (`zh-CN`).
+- **API key** — stored in the macOS Keychain, never in the repository.
+- **App data** — `~/Library/Application Support/com.yiterm.app/`
+  - `settings.json`
+  - `conversations.json`
+  - `chats/<conversation-id>.json`
+- **Logs** — `~/Library/Logs/com.yiterm.app/yiterm.log`
+
+## Notes and limitations
+
+- YiTerm is **unofficial** and is not affiliated with or endorsed by Anthropic. Claude Code is a product and trademark of Anthropic.
+- macOS only for now.
+- The chat mirror depends on Claude Code's JSONL transcript format; parser updates may be needed if that format changes.
+- Free Google endpoints can be rate-limited or unreachable without a proxy; use a proxy or Chat mode.
+- Machine translation is approximate — review important technical text before relying on it.
+
+## License
+
+[MIT](LICENSE)
