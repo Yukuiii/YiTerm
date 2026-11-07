@@ -3,6 +3,7 @@ use std::{collections::HashMap, path::PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod claude;
 pub mod follower;
 
 /// Claude Code munges the cwd into a directory name where every character
@@ -387,6 +388,11 @@ pub struct Conversation {
     pub terminal_id: Option<u64>,
     pub title: String,
     pub created_at: String,
+    /// True for sessions discovered from Claude Code's own records rather than
+    /// created in YiTerm. They are virtual until first opened (then persisted
+    /// with this flag set) and have no delete action in the UI.
+    #[serde(default)]
+    pub imported: bool,
 }
 
 pub fn load_conversations(config_dir: &std::path::Path) -> HashMap<String, Conversation> {
@@ -611,5 +617,20 @@ mod tests {
             let v = json!({ "type": t, "message": { "role": "user", "content": "x" } });
             assert!(parse_line(&v).is_empty(), "{t} should be ignored");
         }
+    }
+
+    #[test]
+    fn old_conversations_json_defaults_to_not_imported() {
+        // Existing conversations.json predates the `imported` field.
+        let v = json!({
+            "id": "app-id",
+            "folder": "/p",
+            "sessionId": "session-id",
+            "terminalId": null,
+            "title": "t",
+            "createdAt": "1"
+        });
+        let conv: Conversation = serde_json::from_value(v).unwrap();
+        assert!(!conv.imported);
     }
 }

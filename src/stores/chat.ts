@@ -74,7 +74,7 @@ interface ChatStore {
   addOptimistic: (convId: string, text: string, images?: string[]) => string;
   addPlain: (convId: string, text: string, images?: string[]) => void;
   markSent: (convId: string, key: string, sentText: string) => void;
-  upsertFromSession: (convId: string, msgs: ChatMsg[]) => void;
+  upsertFromSession: (convId: string, msgs: ChatMsg[], translate?: boolean) => void;
   appendDelta: (convId: string, key: string, delta: string) => void;
   setTranslation: (convId: string, key: string, full: string, fallbackOriginal?: string) => void;
   setError: (convId: string, key: string, message: string) => void;
@@ -210,7 +210,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (images?.length) saveNow(convId);
   },
 
-  upsertFromSession: (convId, msgs) => {
+  upsertFromSession: (convId, msgs, translate = true) => {
     void debugLog(
       `upsert conv=${convId} n=${msgs.length} ` +
         msgs.map((m) => `${m.role}:${m.key.slice(0, 12)}:len${m.text.length}:done${m.done ? 1 : 0}`).join(','),
@@ -318,9 +318,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       // Schedule translation: immediate when done / already-stale, debounced
-      // while streaming so mid-stream snapshots don't burn requests.
+      // while streaming so mid-stream snapshots don't burn requests. Replayed
+      // history from Claude's records is displayed untranslated.
       const inflightKey = `${convId}:${m.key}`;
-      if (textChanged && !inflight.has(inflightKey)) {
+      if (translate && textChanged && !inflight.has(inflightKey)) {
         const current = get().byConv[convId]?.find((x) => x.key === m.key);
         const alreadyCurrent = current?.translatedFrom === m.text && current?.translation;
         if (!alreadyCurrent) {
