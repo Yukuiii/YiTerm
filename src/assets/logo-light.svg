@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="430" height="160" viewBox="0 0 430 160" role="img" aria-label="YiTerm">
+  <defs>
+    <linearGradient id="tile" x1="64" y1="16" x2="64" y2="144" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d1d1d"/>
+      <stop offset="1" stop-color="#090909"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="64" cy="80" r="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#d8753f" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#d8753f" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="0" y="16" width="128" height="128" rx="30" fill="url(#tile)"/>
+  <rect x="0" y="16" width="128" height="128" rx="30" fill="url(#glow)"/>
+  <rect x="0.5" y="16.5" width="127" height="127" rx="29.5" fill="none" stroke="#000000" stroke-opacity="0.08"/>
+
+  <g transform="translate(64 80) scale(5.4) translate(-12 -9.5)" shape-rendering="crispEdges">
+    <g fill="#d8753f">
+      <rect x="4" y="6" width="1" height="2"/>
+      <rect x="3" y="5" width="2" height="1"/>
+      <rect x="2" y="6" width="1" height="2"/>
+      <rect x="3" y="8" width="2" height="1"/>
+      <rect x="19" y="6" width="1" height="2"/>
+      <rect x="19" y="5" width="2" height="1"/>
+      <rect x="21" y="6" width="1" height="2"/>
+      <rect x="19" y="8" width="2" height="1"/>
+      <rect x="5" y="6" width="13" height="5"/>
+      <rect x="6" y="11" width="11" height="1"/>
+    </g>
+    <g fill="#e8915f">
+      <rect x="8" y="4" width="7" height="1"/>
+      <rect x="6" y="5" width="11" height="1"/>
+    </g>
+    <g fill="#b05a2e">
+      <rect x="8" y="12" width="7" height="1"/>
+      <rect x="5" y="13" width="1" height="1"/>
+      <rect x="6" y="14" width="1" height="1"/>
+      <rect x="8" y="13" width="1" height="1"/>
+      <rect x="9" y="14" width="1" height="1"/>
+      <rect x="18" y="13" width="1" height="1"/>
+      <rect x="17" y="14" width="1" height="1"/>
+      <rect x="15" y="13" width="1" height="1"/>
+      <rect x="14" y="14" width="1" height="1"/>
+    </g>
+    <g fill="#16110d">
+      <rect x="8" y="7" width="1" height="1"/>
+      <rect x="14" y="7" width="1" height="1"/>
+      <rect x="11" y="9" width="2" height="1"/>
+    </g>
+  </g>
+
+  <text x="160" y="105" font-family="'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif" font-size="72" font-weight="650" letter-spacing="-2.5" text-rendering="geometricPrecision">
+    <tspan fill="#b45f33">Yi</tspan><tspan fill="#161616">Term</tspan>
+  </text>
+</svg>

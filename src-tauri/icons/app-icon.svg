@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="YiTerm app icon">
+  <defs>
+    <linearGradient id="tile" x1="512" y1="32" x2="512" y2="992" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d1d1d"/>
+      <stop offset="1" stop-color="#090909"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="512" cy="540" r="340" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#d8753f" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#d8753f" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#tile)"/>
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#glow)"/>
+  <ellipse cx="512" cy="712" rx="236" ry="26" fill="#000000" opacity="0.38"/>
+
+  <g transform="translate(512 512) scale(34) translate(-12 -9.5)" shape-rendering="crispEdges">
+    <g fill="#d8753f">
+      <rect x="4" y="6" width="1" height="2"/>
+      <rect x="3" y="5" width="2" height="1"/>
+      <rect x="2" y="6" width="1" height="2"/>
+      <rect x="3" y="8" width="2" height="1"/>
+      <rect x="19" y="6" width="1" height="2"/>
+      <rect x="19" y="5" width="2" height="1"/>
+      <rect x="21" y="6" width="1" height="2"/>
+      <rect x="19" y="8" width="2" height="1"/>
+      <rect x="5" y="6" width="13" height="5"/>
+      <rect x="6" y="11" width="11" height="1"/>
+    </g>
+    <g fill="#e8915f">
+      <rect x="8" y="4" width="7" height="1"/>
+      <rect x="6" y="5" width="11" height="1"/>
+    </g>
+    <g fill="#b05a2e">
+      <rect x="8" y="12" width="7" height="1"/>
+      <rect x="5" y="13" width="1" height="1"/>
+      <rect x="6" y="14" width="1" height="1"/>
+      <rect x="8" y="13" width="1" height="1"/>
+      <rect x="9" y="14" width="1" height="1"/>
+      <rect x="18" y="13" width="1" height="1"/>
+      <rect x="17" y="14" width="1" height="1"/>
+      <rect x="15" y="13" width="1" height="1"/>
+      <rect x="14" y="14" width="1" height="1"/>
+    </g>
+    <g fill="#16110d">
+      <rect x="8" y="7" width="1" height="1"/>
+      <rect x="14" y="7" width="1" height="1"/>
+      <rect x="11" y="9" width="2" height="1"/>
+    </g>
+  </g>
+
+  <rect x="32.5" y="32.5" width="959" height="959" rx="223.5" fill="none" stroke="#ffffff" stroke-opacity="0.06"/>
+</svg>
