@@ -307,7 +307,7 @@ button, input, textarea { font-family: inherit; }
   color: var(--fg-faint);
   font-size: 11.5px;
   text-align: center;
-  line-height: 1.8;
+  line-height: 1.9;
 }
 
 .sidebar-failed {
@@ -480,7 +480,7 @@ button, input, textarea { font-family: inherit; }
 
 .bubble {
   max-width: 100%;
-  font-size: 13.5px;
+  font-size: 14px;
   line-height: 1.68;
   word-break: break-word;
 }
@@ -504,7 +504,7 @@ button, input, textarea { font-family: inherit; }
 
 /* ---------- markdown ---------- */
 
-.md { font-size: 13.5px; line-height: 1.68; }
+.md { font-size: 14px; line-height: 1.68; }
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
 
@@ -520,7 +520,7 @@ button, input, textarea { font-family: inherit; }
 .md h4 { font-size: 1em; }
 
 .md ul, .md ol { margin: 0.45em 0; padding-left: 1.4em; }
-.md li { margin: 0.18em 0; }
+.md li { margin: 0.2em 0; }
 .md li > p { margin: 0.15em 0; }
 
 .md code {
@@ -579,6 +579,7 @@ button, input, textarea { font-family: inherit; }
   margin-top: 7px;
   padding-top: 7px;
   font-size: 11.5px;
+  line-height: 1.5;
   color: var(--fg-muted);
   border-top: 1px dashed #383838;
   white-space: pre-wrap;
@@ -619,7 +620,7 @@ button, input, textarea { font-family: inherit; }
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 9px;
+  padding: 6px 10px;
   list-style: none;
   cursor: pointer;
   font-size: 12px;
@@ -720,9 +721,9 @@ button, input, textarea { font-family: inherit; }
 .composer textarea {
   flex: 1;
   min-width: 0;
-  min-height: 30px;
+  min-height: 32px;
   max-height: 160px;
-  padding: 6px 2px;
+  padding: 7px 2px;
   resize: none;
   background: transparent;
   border: 0;
