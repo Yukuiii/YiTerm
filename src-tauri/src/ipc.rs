@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{ipc::Channel, State};
+use tauri::{ipc::Channel, Emitter, State};
 
 use crate::{
     sessions::{self, follower, Conversation},
@@ -26,6 +26,102 @@ pub struct TerminalStartInfo {
     pub session_id: String,
     pub command: String,
     pub resumed: bool,
+    /// Conversations whose terminals were reclaimed to stay under the cap.
+    /// The frontend drops their entries so the next visit starts `--resume`.
+    pub evicted_conversation_ids: Vec<String>,
+}
+
+/// Keep at most this many live PTY/claude processes. When a new conversation
+/// opens, the least-recently-used idle terminals are reclaimed; busy
+/// conversations are never reclaimed, so the cap is soft while work runs.
+const MAX_LIVE_TERMINALS: usize = 4;
+/// A terminal that printed within this window counts as running even before
+/// the transcript records a turn (startup banner, prompt echo, TUI spinner).
+const OUTPUT_GRACE_MS: i64 = 5_000;
+
+/// Kills the least-recently-used idle terminals until `terms` is below the
+/// cap and returns the evicted conversation ids. A terminal is idle when no
+/// turn is running in its transcript and its PTY has been quiet for a while.
+fn reclaim_idle_terminals(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    keep_conv: &str,
+) -> Vec<String> {
+    let mut evicted = Vec::new();
+    loop {
+        let now = unix_millis();
+        let busy = state.busy.lock().unwrap().clone();
+        let snapshot: Vec<TerminalSnapshot> = state
+            .terms
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(id, t)| TerminalSnapshot {
+                id: *id,
+                conv_id: t.conv_id.clone(),
+                last_output_ms: t.last_output_ms(),
+                exited: t.is_exited(),
+            })
+            .collect();
+        if snapshot.len() < MAX_LIVE_TERMINALS {
+            break;
+        }
+        let Some((id, conv)) = pick_eviction(&snapshot, &busy, keep_conv, now) else {
+            break; // everything left is busy: allow a temporary overshoot
+        };
+        if let Some(handle) = state.terms.write().unwrap().remove(&id) {
+            handle.kill();
+        }
+        if let Some(c) = state.convs.write().unwrap().get_mut(&conv) {
+            c.terminal_id = None;
+        }
+        if let Some(f) = state.followers.lock().unwrap().remove(&conv) {
+            f.abort();
+        }
+        state.busy.lock().unwrap().remove(&conv);
+        let _ = app.emit(
+            "conversation-busy",
+            follower::ConversationBusy {
+                conversation_id: conv.clone(),
+                busy: false,
+            },
+        );
+        state.persist_conversations(app);
+        tracing::info!(terminal = id, conv = %conv, "reclaimed idle terminal");
+        evicted.push(conv);
+    }
+    evicted
+}
+
+/// What the reclaimer needs to know about one live terminal.
+struct TerminalSnapshot {
+    id: u64,
+    conv_id: String,
+    last_output_ms: i64,
+    exited: bool,
+}
+
+/// Picks the least-recently-used idle terminal, if any. Exited terminals are
+/// always eligible; a live one must have no running turn in its transcript and
+/// a quiet PTY. Returns `None` when every candidate is busy.
+fn pick_eviction(
+    terminals: &[TerminalSnapshot],
+    busy: &std::collections::HashMap<String, bool>,
+    keep_conv: &str,
+    now: i64,
+) -> Option<(u64, String)> {
+    let mut candidates: Vec<&TerminalSnapshot> = terminals
+        .iter()
+        // Dead terminals of the conversation being opened are stale links.
+        .filter(|t| t.conv_id != keep_conv || t.exited)
+        .filter(|t| {
+            t.exited
+                || (!busy.get(&t.conv_id).copied().unwrap_or(false)
+                    && now - t.last_output_ms >= OUTPUT_GRACE_MS)
+        })
+        .collect();
+    candidates.sort_by_key(|t| t.last_output_ms);
+    candidates.first().map(|t| (t.id, t.conv_id.clone()))
 }
 
 #[tauri::command]
@@ -49,6 +145,7 @@ pub async fn terminal_start(
                 session_id: t.session_id.clone(),
                 command: t.command.clone(),
                 resumed: true,
+                evicted_conversation_ids: Vec::new(),
             });
         }
     }
@@ -114,6 +211,10 @@ pub async fn terminal_start(
         return Err("session transcript not found".into());
     }
 
+    // Keep the number of live Claude processes bounded: reclaim the oldest
+    // idle terminals before adding another one.
+    let evicted = reclaim_idle_terminals(&app, &state, &conv.id);
+
     let id = state.new_terminal_id();
     let handle = TerminalHandle::spawn(
         id,
@@ -152,6 +253,7 @@ pub async fn terminal_start(
                 jsonl,
                 session_id.clone(),
                 conv.imported,
+                state.busy.clone(),
             ),
         );
     }
@@ -162,6 +264,7 @@ pub async fn terminal_start(
         session_id,
         command,
         resumed,
+        evicted_conversation_ids: evicted,
     })
 }
 
@@ -340,6 +443,14 @@ pub fn conversations_delete(app: tauri::AppHandle, state: State<'_, AppState>, i
     if let Some(handle) = state.followers.lock().unwrap().remove(&id) {
         handle.abort();
     }
+    state.busy.lock().unwrap().remove(&id);
+    let _ = app.emit(
+        "conversation-busy",
+        follower::ConversationBusy {
+            conversation_id: id.clone(),
+            busy: false,
+        },
+    );
     // Pasted screenshots are conversation-scoped; don't leave them in the cache.
     if valid_conv_id(&id) {
         let images = images_dir(&state, &app, &id);
@@ -569,12 +680,16 @@ pub fn chat_attachment_import(
     })
 }
 
-fn now_iso() -> String {
-    let now = std::time::SystemTime::now()
+/// Unix millis — enough for stable newest-first ordering.
+fn unix_millis() -> i64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    // Unix millis — enough for stable newest-first ordering.
-    format!("{}", now.as_millis())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn now_iso() -> String {
+    format!("{}", unix_millis())
 }
 
 // ---------- settings ----------
@@ -716,5 +831,60 @@ mod tests {
         let mut at_cap = vec![0u8; MAX_IMAGE_BYTES];
         at_cap[..8].copy_from_slice(&PNG[..8]);
         assert_eq!(validate_image("ok", "image/png", &at_cap), Ok("png"));
+    }
+
+    #[test]
+    fn eviction_prefers_the_oldest_idle_terminal() {
+        let now = 1_000_000;
+        let terminals = vec![
+            TerminalSnapshot { id: 1, conv_id: "a".into(), last_output_ms: now - 60_000, exited: false },
+            TerminalSnapshot { id: 2, conv_id: "b".into(), last_output_ms: now - 10_000, exited: false },
+            TerminalSnapshot { id: 3, conv_id: "c".into(), last_output_ms: now - 1_000, exited: false },
+        ];
+        let busy = std::collections::HashMap::new();
+        assert_eq!(
+            pick_eviction(&terminals, &busy, "new", now),
+            Some((1, "a".to_string()))
+        );
+    }
+
+    #[test]
+    fn eviction_skips_busy_and_recently_printing_terminals() {
+        let now = 1_000_000;
+        let terminals = vec![
+            TerminalSnapshot { id: 1, conv_id: "busy".into(), last_output_ms: now - 60_000, exited: false },
+            TerminalSnapshot { id: 2, conv_id: "recent".into(), last_output_ms: now - 1_000, exited: false },
+            TerminalSnapshot { id: 3, conv_id: "idle".into(), last_output_ms: now - 30_000, exited: false },
+        ];
+        let busy = std::collections::HashMap::from([("busy".to_string(), true)]);
+        assert_eq!(
+            pick_eviction(&terminals, &busy, "new", now),
+            Some((3, "idle".to_string()))
+        );
+    }
+
+    #[test]
+    fn eviction_never_touches_the_active_conversation() {
+        let now = 1_000_000;
+        let terminals = vec![
+            TerminalSnapshot { id: 1, conv_id: "active".into(), last_output_ms: now - 60_000, exited: false },
+            TerminalSnapshot { id: 2, conv_id: "dead".into(), last_output_ms: now - 1_000, exited: true },
+        ];
+        let busy = std::collections::HashMap::new();
+        // The active live terminal is skipped; the dead one can go.
+        assert_eq!(
+            pick_eviction(&terminals, &busy, "active", now),
+            Some((2, "dead".to_string()))
+        );
+
+        // Nothing evictable → the caller allows a temporary overshoot.
+        let all_busy = std::collections::HashMap::from([("a".to_string(), true)]);
+        let terms = vec![TerminalSnapshot {
+            id: 1,
+            conv_id: "a".into(),
+            last_output_ms: now - 60_000,
+            exited: false,
+        }];
+        assert_eq!(pick_eviction(&terms, &all_busy, "new", now), None);
     }
 }

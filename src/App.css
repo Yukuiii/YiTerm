@@ -299,6 +299,7 @@ button, input, textarea { font-family: inherit; }
 }
 
 .session-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -313,6 +314,20 @@ button, input, textarea { font-family: inherit; }
 .session-row:focus-visible { box-shadow: inset 0 0 0 1px #3d3d3d; }
 .session-row.active { background: var(--bg-active); color: #f2f2f2; }
 
+.session-busy {
+  flex: none;
+  display: inline-flex;
+  color: inherit;
+  opacity: 0.7;
+  animation: session-spin 1s linear infinite;
+}
+
+@keyframes session-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .session-title {
   flex: 1;
   min-width: 0;
@@ -320,22 +335,29 @@ button, input, textarea { font-family: inherit; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Reserve room for the hover-only delete button (absolutely positioned so
+   showing it never changes the row height). */
+.session-row.has-del .session-title { padding-right: 22px; }
 
 .session-del {
-  flex: none;
-  display: none;
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  display: flex;
   align-items: center;
   justify-content: center;
   width: 20px;
   height: 20px;
   padding: 0;
+  visibility: hidden;
   background: none;
   border: 0;
   border-radius: 5px;
   color: var(--fg-faint);
   cursor: pointer;
 }
-.session-row:hover .session-del { display: flex; }
+.session-row:hover .session-del { visibility: visible; }
 .session-del:hover { background: #333; color: var(--danger); }
 
 .side-empty {

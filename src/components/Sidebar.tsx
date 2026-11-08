@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { Conversation } from '../ipc';
 import type { ViewMode } from '../types';
+import { useTerminalsStore } from '../stores/terminals';
 import { folderName, oneLine } from '../format';
 import {
   ChatIcon,
@@ -12,6 +13,7 @@ import {
   PlusIcon,
   SearchIcon,
   SlidersIcon,
+  SpinnerIcon,
   XIcon,
 } from './Icons';
 
@@ -54,6 +56,7 @@ export default function Sidebar({
   const [moreOpen, setMoreOpen] = useState(false);
   // Explicit user toggles win over the "active project is open" default.
   const [openOverrides, setOpenOverrides] = useState<Record<string, boolean>>({});
+  const busyConv = useTerminalsStore((s) => s.busyConv);
   const q = query.trim().toLowerCase();
   const activeFolder = conversations.find((c) => c.id === activeId)?.folder;
 
@@ -215,7 +218,7 @@ export default function Sidebar({
                     {g.convs.map(({ conv, label }) => (
                       <div
                         key={conv.id}
-                        className={`session-row ${conv.id === activeId ? 'active' : ''}`}
+                        className={`session-row ${conv.id === activeId ? 'active' : ''} ${!conv.imported ? 'has-del' : ''}`}
                         role="button"
                         tabIndex={0}
                         title={conv.folder}
@@ -227,6 +230,11 @@ export default function Sidebar({
                           }
                         }}
                       >
+                        {busyConv[conv.id] && (
+                          <span className="session-busy" title="运行中" aria-label="运行中">
+                            <SpinnerIcon size={12} />
+                          </span>
+                        )}
                         <span className="session-title">{label}</span>
                         {!conv.imported && (
                           <button

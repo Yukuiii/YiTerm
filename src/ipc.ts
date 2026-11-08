@@ -85,6 +85,8 @@ export interface TerminalStartInfo {
   sessionId: string;
   command: string;
   resumed: boolean;
+  /** Conversations whose terminals were reclaimed to stay under the cap. */
+  evictedConversationIds: string[];
 }
 
 // ---------- terminal ----------
@@ -238,6 +240,16 @@ export function translate(
 
 export function onSessionUpdate(cb: (payload: SessionUpdate) => void): Promise<UnlistenFn> {
   return listen<SessionUpdate>('session-update', (e) => cb(e.payload));
+}
+
+/** A conversation's turn started or finished (drives the sidebar spinner). */
+export interface ConversationBusy {
+  conversationId: string;
+  busy: boolean;
+}
+
+export function onConversationBusy(cb: (p: ConversationBusy) => void): Promise<UnlistenFn> {
+  return listen<ConversationBusy>('conversation-busy', (e) => cb(e.payload));
 }
 
 // ---------- misc ----------

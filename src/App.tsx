@@ -9,7 +9,14 @@ import {
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { appConfigDir, appLogDir } from '@tauri-apps/api/path';
-import { currentUser, debugLog, onSessionUpdate, terminalKill, type Conversation } from './ipc';
+import {
+  currentUser,
+  debugLog,
+  onConversationBusy,
+  onSessionUpdate,
+  terminalKill,
+  type Conversation,
+} from './ipc';
 import { useChatStore } from './stores/chat';
 import { useConversationsStore } from './stores/conversations';
 import { useSettingsStore } from './stores/settings';
@@ -61,8 +68,13 @@ export default function App() {
         .getState()
         .upsertFromSession(payload.conversationId, payload.upserts, translate);
     });
+    // Sidebar spinner: a turn is running in that conversation's terminal.
+    const unBusy = onConversationBusy((p) => {
+      useTerminalsStore.getState().setBusy(p.conversationId, p.busy);
+    });
     return () => {
       void un.then((f) => f());
+      void unBusy.then((f) => f());
     };
   }, [loadConvs, loadSettings]);
 

@@ -20,6 +20,9 @@ pub struct AppState {
     pub convs: RwLock<HashMap<String, Conversation>>,
     /// Follower tasks per conversation id, so they can be aborted on delete.
     pub followers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// conv id → a turn is running (derived from the JSONL transcript). The
+    /// idle-terminal reclaimer never evicts a busy conversation.
+    pub busy: Arc<Mutex<HashMap<String, bool>>>,
     pub settings: RwLock<Settings>,
     pub http: reqwest::Client,
     /// Lazily loaded local translation model (Hy-MT2-1.8B).
@@ -42,6 +45,7 @@ impl AppState {
             terms: RwLock::new(HashMap::new()),
             convs: RwLock::new(convs),
             followers: Mutex::new(HashMap::new()),
+            busy: Arc::new(Mutex::new(HashMap::new())),
             settings: RwLock::new(settings),
             http: build_http_client(),
             local: Arc::new(tokio::sync::Mutex::new(None)),

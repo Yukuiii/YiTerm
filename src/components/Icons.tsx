@@ -146,6 +146,21 @@ export const ArrowDownIcon = ({ size = 16 }: { size?: number }) => (
   </Icon>
 );
 
+export const SpinnerIcon = ({ size = 16 }: { size?: number }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    aria-hidden="true"
+  >
+    <path d="M21 12a9 9 0 1 0-9 9" />
+  </svg>
+);
+
 export const PaperclipIcon = ({ size = 16 }: { size?: number }) => (
   <Icon size={size}>
     <path d="M21 12.5 12.5 21a5 5 0 0 1-7-7l8-8a3.5 3.5 0 0 1 5 5l-8 8a2 2 0 0 1-2.8-2.8l7.3-7.3" />

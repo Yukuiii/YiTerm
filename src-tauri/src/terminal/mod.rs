@@ -2,7 +2,10 @@ pub mod buffer;
 
 use std::{
     io::{Read, Write},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -51,6 +54,9 @@ pub struct TerminalHandle {
     pub command: String,
     pub started_at_ms: i64,
     pub exited: Mutex<bool>,
+    /// When the PTY last produced output (unix millis). The idle-terminal
+    /// reclaimer treats recent output as "still running".
+    last_output_ms: AtomicI64,
     backlog: Mutex<Backlog>,
     subs: Mutex<Vec<Channel<TerminalEvent>>>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
@@ -146,6 +152,7 @@ impl TerminalHandle {
             command,
             started_at_ms,
             exited: Mutex::new(false),
+            last_output_ms: AtomicI64::new(chrono_millis()),
             backlog: Mutex::new(Backlog::new(RING_CAP)),
             subs: Mutex::new(Vec::new()),
             writer: Mutex::new(Some(writer)),
@@ -270,6 +277,15 @@ impl TerminalHandle {
         }
     }
 
+    /// Last PTY output time (unix millis), for idle reclamation.
+    pub fn last_output_ms(&self) -> i64 {
+        self.last_output_ms.load(Ordering::Relaxed)
+    }
+
+    pub fn is_exited(&self) -> bool {
+        *self.exited.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn exit_code(&self) -> Option<Option<i32>> {
         self.child
             .lock()
@@ -302,6 +318,7 @@ impl TerminalHandle {
     }
 
     fn append_and_broadcast(&self, bytes: &[u8]) {
+        self.last_output_ms.store(chrono_millis(), Ordering::Relaxed);
         // Caller holds `subs` lock; lock order is always subs → backlog.
         let mut subs = self.subs.lock().unwrap();
         let seq = {
