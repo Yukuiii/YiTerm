@@ -23,6 +23,7 @@ export interface ConversationsOverview {
 export interface TranslationSettings {
   mode: 'google' | 'chat' | 'local';
   targetZh: string;
+  chatProvider: 'custom' | 'siliconflow' | 'openrouter';
   chatBaseUrl: string | null;
   chatModelId: string | null;
   /** Custom GGUF path for local mode; null → managed download location. */
@@ -148,9 +149,11 @@ export const settingsGet = () => invoke<Settings>('settings_get');
 export const settingsSet = (settings: Settings) =>
   invoke<void>('settings_set', { settings });
 
-export const apiKeyGet = () => invoke<string | null>('api_key_get');
+export const apiKeyGet = (provider: string) =>
+  invoke<string | null>('api_key_get', { provider });
 
-export const apiKeySet = (key: string | null) => invoke<void>('api_key_set', { key });
+export const apiKeySet = (key: string | null, provider: string) =>
+  invoke<void>('api_key_set', { key, provider });
 
 // ---------- local model ----------
 

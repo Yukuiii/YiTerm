@@ -15,10 +15,18 @@ pub struct TranslationSettings {
     /// Target language for the en→native direction.
     #[serde(default = "default_target_zh")]
     pub target_zh: String,
+    /// Chat-mode provider preset: "custom", "siliconflow", or "openrouter".
+    /// Informational only — requests use `chat_base_url` + `chat_model_id`.
+    #[serde(default = "default_chat_provider")]
+    pub chat_provider: String,
     pub chat_base_url: Option<String>,
     pub chat_model_id: Option<String>,
     /// Custom GGUF path for local mode; None → managed download location.
     pub local_model_path: Option<String>,
+}
+
+fn default_chat_provider() -> String {
+    "custom".to_string()
 }
 
 fn default_mode() -> String {
@@ -34,6 +42,7 @@ impl Default for TranslationSettings {
         Self {
             mode: default_mode(),
             target_zh: default_target_zh(),
+            chat_provider: default_chat_provider(),
             chat_base_url: None,
             chat_model_id: None,
             local_model_path: None,
@@ -102,8 +111,19 @@ fn which_claude() -> Option<String> {
 
 // ---------- API key (macOS Keychain) ----------
 
-pub fn api_key_get() -> Option<String> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER).ok()?;
+/// One key per chat provider: preset keys must not overwrite each other.
+/// `custom` keeps the original account name so existing keys continue to work.
+fn keychain_user(provider: &str) -> String {
+    let provider = provider.trim();
+    if provider.is_empty() || provider == "custom" {
+        KEYCHAIN_USER.to_string()
+    } else {
+        format!("{KEYCHAIN_USER}:{provider}")
+    }
+}
+
+pub fn api_key_get(provider: &str) -> Option<String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &keychain_user(provider)).ok()?;
     match entry.get_password() {
         Ok(k) => Some(k),
         Err(keyring::Error::NoEntry) => None,
@@ -114,8 +134,9 @@ pub fn api_key_get() -> Option<String> {
     }
 }
 
-pub fn api_key_set(key: Option<String>) -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_USER).map_err(|e| e.to_string())?;
+pub fn api_key_set(provider: &str, key: Option<String>) -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &keychain_user(provider))
+        .map_err(|e| e.to_string())?;
     match key {
         Some(k) if !k.trim().is_empty() => entry
             .set_password(k.trim())
@@ -125,5 +146,32 @@ pub fn api_key_set(key: Option<String>) -> Result<(), String> {
             Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(e.to_string()),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_without_chat_provider_default_to_custom() {
+        // Settings written before provider presets existed must still load.
+        let s: Settings = serde_json::from_str(
+            r#"{"translation":{"mode":"chat","chatBaseUrl":"https://example.com/v1","chatModelId":"m"}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.translation.chat_provider, "custom");
+        assert_eq!(s.translation.mode, "chat");
+    }
+
+    #[test]
+    fn chat_provider_roundtrips() {
+        let json = serde_json::to_string(&TranslationSettings {
+            chat_provider: "openrouter".into(),
+            ..TranslationSettings::default()
+        })
+        .unwrap();
+        let back: TranslationSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.chat_provider, "openrouter");
     }
 }

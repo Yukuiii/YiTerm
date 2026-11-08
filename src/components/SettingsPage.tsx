@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  apiKeyGet,
+  apiKeySet,
   modelDelete,
   modelDownload,
   modelStatus,
@@ -13,8 +15,33 @@ import { useSettingsStore } from '../stores/settings';
 
 const fmtMB = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
 
+type ChatProviderId = 'siliconflow' | 'openrouter' | 'custom';
+
+/** Known OpenAI-compatible endpoints; picking one needs only an API key. */
+const CHAT_PROVIDERS: Record<
+  Exclude<ChatProviderId, 'custom'>,
+  { label: string; baseUrl: string; modelId: string }
+> = {
+  siliconflow: {
+    label: '硅基流动',
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    modelId: 'Qwen/Qwen3.5-4B',
+  },
+  openrouter: {
+    label: 'OpenRouter',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    modelId: 'qwen/qwen-2.5-7b-instruct',
+  },
+};
+
+const CHAT_PROVIDER_OPTIONS: { id: ChatProviderId; label: string }[] = [
+  { id: 'siliconflow', label: '硅基流动' },
+  { id: 'openrouter', label: 'OpenRouter' },
+  { id: 'custom', label: '自定义' },
+];
+
 export default function SettingsPage({ onClose }: { onClose: () => void }) {
-  const { settings, hasApiKey, save, setApiKey } = useSettingsStore();
+  const { settings, save } = useSettingsStore();
   // Edits live in a draft; when untouched the loaded settings are the value.
   const [draft, setDraft] = useState<Settings | null>(null);
   const [apiKeyDraft, setApiKeyDraft] = useState('');
@@ -22,8 +49,12 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const [testResult, setTestResult] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [model, setModel] = useState<ModelStatus | null>(null);
+  const [hasKey, setHasKey] = useState(false);
 
   const current = draft ?? settings;
+  // Provider is stored per key, so the "saved" state follows the draft.
+  const activeChatProvider: ChatProviderId =
+    current?.translation.chatProvider ?? 'custom';
 
   // Status is best-effort; on failure the section simply stays blank.
   const refreshModel = useCallback(() => {
@@ -31,6 +62,18 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
       .then((s) => setModel(s))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    let alive = true;
+    apiKeyGet(activeChatProvider)
+      .then((key) => {
+        if (alive) setHasKey(!!key);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [activeChatProvider]);
 
   useEffect(() => {
     refreshModel();
@@ -57,12 +100,30 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
 
   if (!current) return null;
   const t = current.translation;
+  const chatProvider: ChatProviderId = t.chatProvider ?? 'custom';
+  const providerPreset = chatProvider === 'custom' ? null : CHAT_PROVIDERS[chatProvider];
+
+  /** Selecting a known provider pre-fills its endpoint and a default model. */
+  const pickChatProvider = (id: ChatProviderId) => {
+    const preset = id === 'custom' ? null : CHAT_PROVIDERS[id];
+    // A key typed for the previous provider must not be saved under the new one.
+    setApiKeyDraft('');
+    setDraft({
+      ...current,
+      translation: {
+        ...t,
+        chatProvider: id,
+        ...(preset ? { chatBaseUrl: preset.baseUrl, chatModelId: preset.modelId } : {}),
+      },
+    });
+  };
 
   const saveAll = async () => {
     await save(current);
     if (apiKeyDraft.trim()) {
-      await setApiKey(apiKeyDraft.trim());
+      await apiKeySet(apiKeyDraft.trim(), activeChatProvider);
       setApiKeyDraft('');
+      setHasKey(true);
     }
     setSaved(true);
     window.setTimeout(() => setSaved(false), 1500);
@@ -75,8 +136,9 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
     // Apply the draft first so the backend uses it, then test.
     await save(current);
     if (apiKeyDraft.trim()) {
-      await setApiKey(apiKeyDraft.trim());
+      await apiKeySet(apiKeyDraft.trim(), activeChatProvider);
       setApiKeyDraft('');
+      setHasKey(true);
     }
     try {
       const out = await translate('zh-en', '你好，世界！', () => {});
@@ -141,7 +203,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
             />
             <div>
               <div className="radio-title">Chat 模式</div>
-              <div className="radio-desc">任意 OpenAI 兼容接口（OpenAI / DeepSeek / Qwen / 自建…）</div>
+              <div className="radio-desc">硅基流动 / OpenRouter 预设，或任意 OpenAI 兼容接口</div>
             </div>
           </label>
           <label className="radio-row">
@@ -160,36 +222,57 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
           {t.mode === 'chat' && (
             <div className="chat-config">
               <label>
-                Base URL
-                <input
-                  type="text"
-                  placeholder="https://api.deepseek.com/v1"
-                  value={t.chatBaseUrl ?? ''}
-                  onChange={(e) => setDraft({ ...current, translation: { ...t, chatBaseUrl: e.target.value } })}
-                />
+                供应商
+                <div className="mode-switch">
+                  {CHAT_PROVIDER_OPTIONS.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className={`mode-btn ${chatProvider === p.id ? 'active' : ''}`}
+                      onClick={() => pickChatProvider(p.id)}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
               </label>
+              {chatProvider === 'custom' && (
+                <label>
+                  Base URL
+                  <input
+                    type="text"
+                    placeholder="https://api.deepseek.com/v1"
+                    value={t.chatBaseUrl ?? ''}
+                    onChange={(e) => setDraft({ ...current, translation: { ...t, chatBaseUrl: e.target.value } })}
+                  />
+                </label>
+              )}
               <label>
                 模型 ID
                 <input
                   type="text"
-                  placeholder="deepseek-chat"
+                  placeholder={providerPreset?.modelId ?? 'deepseek-chat'}
                   value={t.chatModelId ?? ''}
                   onChange={(e) => setDraft({ ...current, translation: { ...t, chatModelId: e.target.value } })}
                 />
               </label>
               <label>
-                API Key {hasApiKey && <span className="key-badge">已存于钥匙串</span>}
+                API Key{providerPreset ? `（${providerPreset.label}）` : ''}{' '}
+                {hasKey && <span className="key-badge">已存于钥匙串</span>}
                 <input
                   type="password"
-                  placeholder={hasApiKey ? '（已保存，输入可覆盖）' : 'sk-…'}
+                  placeholder={hasKey ? '（已保存，输入可覆盖）' : 'sk-…'}
                   value={apiKeyDraft}
                   onChange={(e) => setApiKeyDraft(e.target.value)}
                 />
               </label>
-              {hasApiKey && (
+              {hasKey && (
                 <button
                   className="ghost-btn"
-                  onClick={async () => { await setApiKey(null); }}
+                  onClick={async () => {
+                    await apiKeySet(null, chatProvider);
+                    setHasKey(false);
+                  }}
                 >
                   清除已保存的 API Key
                 </button>
