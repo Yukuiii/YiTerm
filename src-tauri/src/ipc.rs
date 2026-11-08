@@ -784,31 +784,59 @@ pub async fn translate(
     channel: Channel<TranslateEvent>,
 ) -> Result<String, String> {
     let settings = state.settings.read().unwrap().clone();
-    if settings.translation.mode == "local" {
-        return translate::local::translate(&app, &state, direction, &text, &request_id, &channel)
-            .await;
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    state
+        .translate_cancels
+        .lock()
+        .unwrap()
+        .insert(request_id.clone(), cancel_tx);
+
+    let result = tokio::select! {
+        result = async {
+            if settings.translation.mode == "local" {
+                return translate::local::translate(&app, &state, direction, &text, &request_id, &channel).await;
+            }
+            let http = state.http.clone();
+            let key_provider = if settings.translation.mode == "deepl" {
+                "deepl".to_string()
+            } else {
+                settings.translation.chat_provider.clone()
+            };
+            let api_key = if matches!(settings.translation.mode.as_str(), "chat" | "deepl") {
+                crate::settings::api_key_get(&state.config_dir(&app), &key_provider)
+            } else {
+                None
+            };
+            translate::run(
+                &http,
+                &settings.translation,
+                api_key.as_deref(),
+                direction,
+                &text,
+                &request_id,
+                &channel,
+            )
+            .await
+        } => result,
+        _ = cancel_rx => Err("翻译已取消".into()),
+    };
+
+    state.translate_cancels.lock().unwrap().remove(&request_id);
+    result
+}
+
+/// Aborts an in-flight `translate` request (dropping its HTTP request and
+/// stream). Unknown ids are ignored.
+#[tauri::command]
+pub fn translate_cancel(state: State<'_, AppState>, request_id: String) {
+    if let Some(tx) = state
+        .translate_cancels
+        .lock()
+        .unwrap()
+        .remove(&request_id)
+    {
+        let _ = tx.send(());
     }
-    let http = state.http.clone();
-    let key_provider = if settings.translation.mode == "deepl" {
-        "deepl".to_string()
-    } else {
-        settings.translation.chat_provider.clone()
-    };
-    let api_key = if matches!(settings.translation.mode.as_str(), "chat" | "deepl") {
-        crate::settings::api_key_get(&state.config_dir(&app), &key_provider)
-    } else {
-        None
-    };
-    translate::run(
-        &http,
-        &settings.translation,
-        api_key.as_deref(),
-        direction,
-        &text,
-        &request_id,
-        &channel,
-    )
-    .await
 }
 
 // ---------- local model management ----------

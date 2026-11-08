@@ -40,6 +40,7 @@ pub fn run() {
             ipc::api_key_get,
             ipc::api_key_set,
             ipc::translate,
+            ipc::translate_cancel,
             ipc::model_status,
             ipc::model_download,
             ipc::model_delete,

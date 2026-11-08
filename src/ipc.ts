@@ -215,30 +215,55 @@ export function translate(
   text: string,
   onUpdate: (ev: TranslateEvent) => void,
   idleTimeoutMs = 25_000,
+  signal?: AbortSignal,
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
+    const requestId = crypto.randomUUID();
     const channel = new Channel<TranslateEvent>();
     let timer: number | undefined;
+    let aborted = false;
+
+    const onAbort = () => {
+      aborted = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      void invoke('translate_cancel', { requestId }).catch(() => {});
+      reject(new DOMException('翻译已取消', 'AbortError'));
+    };
+    const settle = () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
     const arm = () => {
       if (timer !== undefined) window.clearTimeout(timer);
-      timer = window.setTimeout(
-        () => reject(new Error('翻译服务无响应（超时），请检查网络或翻译设置')),
-        idleTimeoutMs,
-      );
+      timer = window.setTimeout(() => {
+        aborted = true;
+        settle();
+        void invoke('translate_cancel', { requestId }).catch(() => {});
+        reject(new Error('翻译服务无响应（超时），请检查网络或翻译设置'));
+      }, idleTimeoutMs);
     };
     channel.onmessage = (ev) => {
+      if (aborted) return;
       arm();
       onUpdate(ev);
     };
     arm();
-    const requestId = crypto.randomUUID();
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
     invoke<string>('translate', { requestId, direction, text, channel })
       .then((final) => {
-        if (timer !== undefined) window.clearTimeout(timer);
+        if (aborted) return;
+        settle();
         resolve(final);
       })
       .catch((e) => {
-        if (timer !== undefined) window.clearTimeout(timer);
+        if (aborted) return;
+        settle();
         reject(e);
       });
   });

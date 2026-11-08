@@ -50,6 +50,12 @@ export default function ChatPanel({ convId }: { convId: string }) {
   const [attaching, setAttaching] = useState(0);
   const messagesRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // One send at a time; a newer token invalidates an in-flight translation
+  // when Esc cancels the prompt before it reaches the terminal.
+  const sendTokenRef = useRef(0);
+  const sendingRef = useRef(false);
+  const sentRef = useRef(false);
+  const sendAbortRef = useRef<AbortController | null>(null);
   // Whether the list is parked at the newest message. While it isn't (the
   // user scrolled up to read), streaming updates must not yank the view down;
   // a floating button offers the jump instead.
@@ -211,24 +217,40 @@ export default function ChatPanel({ convId }: { convId: string }) {
     // A sent turn always brings the view to the newest message.
     scrollToBottom();
     setSending(true);
+    sendingRef.current = true;
+    sentRef.current = false;
+    const token = ++sendTokenRef.current;
     const store = useChatStore.getState();
+    let controller: AbortController | undefined;
     try {
       if (hasCJK(text)) {
         const key = store.addOptimistic(convId, text, paths, filePaths);
-        const en = await store.translateOutbound(convId, key, text);
+        controller = new AbortController();
+        sendAbortRef.current = controller;
+        const en = await store.translateOutbound(convId, key, text, controller.signal);
+        if (token !== sendTokenRef.current) {
+          // Esc canceled the send while it was being translated; the prompt
+          // must not reach the terminal.
+          useChatStore.getState().setWorking(convId, key, false);
+          useChatStore.getState().markMessageInterrupted(convId, key);
+          return;
+        }
         const sent = withFiles(en, filePaths);
         // Record before writing: the JSONL line can land within milliseconds
         // of the write and reconcile relies on this text.
         useChatStore.getState().markSent(convId, key, sent);
+        sentRef.current = true;
         await terminalSendPrompt(termId, sent, paths);
       } else {
         const sent = withFiles(text, filePaths);
         const key = store.addPlain(convId, text, paths, filePaths);
         // The bubble shows the typed text; reconcile against what Claude saw.
         if (filePaths.length) store.markSent(convId, key, sent);
+        sentRef.current = true;
         await terminalSendPrompt(termId, sent, paths);
       }
     } catch (e) {
+      if (token !== sendTokenRef.current) return; // canceled; ignore the failure
       // 翻译失败：原文已在气泡中，给出发送选项
       const list = useChatStore.getState().byConv[convId] ?? [];
       const last = list[list.length - 1];
@@ -236,7 +258,15 @@ export default function ChatPanel({ convId }: { convId: string }) {
         useChatStore.getState().setError(convId, last.key, String(e));
       }
     } finally {
-      setSending(false);
+      if (controller && sendAbortRef.current === controller) {
+        sendAbortRef.current = null;
+      }
+      // A canceled send may have been superseded by a newer one; don't clear
+      // the newer send's state.
+      if (token === sendTokenRef.current) {
+        sendingRef.current = false;
+        setSending(false);
+      }
     }
   };
 
@@ -254,8 +284,28 @@ export default function ChatPanel({ convId }: { convId: string }) {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
       const target = e.target instanceof Element ? e.target : null;
-      // Menus/modals own their Esc, and xterm already writes the key to the PTY.
-      if (target?.closest('.sidebar, .settings-overlay, .dropdown-menu, .xterm')) return;
+      // Menus/modals/sidebar own their Esc.
+      if (target?.closest('.sidebar, .settings-overlay, .dropdown-menu')) return;
+      // A prompt still in its outbound translation has not reached Claude yet;
+      // Esc cancels the send instead of interrupting an idle terminal.
+      if (sendingRef.current && !sentRef.current) {
+        e.preventDefault();
+        sendTokenRef.current++;
+        sendAbortRef.current?.abort();
+        sendAbortRef.current = null;
+        sendingRef.current = false;
+        setSending(false);
+        const store = useChatStore.getState();
+        const cur = store.byConv[convId] ?? [];
+        const last = cur[cur.length - 1];
+        if (last?.role === 'user') {
+          store.setWorking(convId, last.key, false);
+          store.markMessageInterrupted(convId, last.key);
+        }
+        return;
+      }
+      // xterm already writes Esc to the PTY.
+      if (target?.closest('.xterm')) return;
       const list = useChatStore.getState().byConv[convId] ?? [];
       const pending = list.length > 0 && list[list.length - 1].role === 'user';
       // The busy flag comes from a 300 ms transcript poll; a trailing user

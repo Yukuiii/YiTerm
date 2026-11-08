@@ -111,10 +111,17 @@ interface ChatStore {
   setWorking: (convId: string, key: string, working: boolean) => void;
   /** Esc aborted the pending turn: tag its user bubble as interrupted. */
   markLastPromptInterrupted: (convId: string) => void;
+  /** Tag one specific user bubble as interrupted. */
+  markMessageInterrupted: (convId: string, key: string) => void;
   /** 立即翻译一条消息（assistant en→zh） */
   translateNow: (convId: string, key: string) => Promise<void>;
   /** 发送方向的翻译（zh→en），返回最终英文 */
-  translateOutbound: (convId: string, key: string, text: string) => Promise<string>;
+  translateOutbound: (
+    convId: string,
+    key: string,
+    text: string,
+    signal?: AbortSignal,
+  ) => Promise<string>;
 }
 
 // ---- module-level translation scheduling state ----
@@ -510,6 +517,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return {};
     }),
 
+  markMessageInterrupted: (convId, key) =>
+    set((s) => ({
+      byConv: updateMsg(s.byConv, convId, key, (m) => ({
+        ...m, interrupted: true,
+      })),
+    })),
+
   translateNow: async (convId, key) => {
     const id = `${convId}:${key}`;
     if (inflight.has(id)) return;
@@ -591,12 +605,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  translateOutbound: async (convId, key, text) => {
-    const final = await translate('zh-en', text, (ev) => {
-      if (ev.type === 'delta') get().appendDelta(convId, key, ev.text);
-      else if (ev.type === 'done') get().setTranslation(convId, key, ev.text, text);
-      else if (ev.type === 'error') get().setError(convId, key, ev.message);
-    });
+  translateOutbound: async (convId, key, text, signal) => {
+    const final = await translate(
+      'zh-en',
+      text,
+      (ev) => {
+        if (ev.type === 'delta') get().appendDelta(convId, key, ev.text);
+        else if (ev.type === 'done') get().setTranslation(convId, key, ev.text, text);
+        else if (ev.type === 'error') get().setError(convId, key, ev.message);
+      },
+      undefined,
+      signal,
+    );
     get().setTranslation(convId, key, final, text);
     return final;
   },

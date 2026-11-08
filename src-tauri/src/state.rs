@@ -25,6 +25,9 @@ pub struct AppState {
     pub busy: Arc<Mutex<HashMap<String, bool>>>,
     pub settings: RwLock<Settings>,
     pub http: reqwest::Client,
+    /// In-flight translation requests, keyed by request id, so the frontend
+    /// can cancel one (e.g. Esc while the outbound prompt is translating).
+    pub translate_cancels: Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>,
     /// Lazily loaded local translation model (Hy-MT2-1.8B).
     pub local: TranslatorHandle,
     /// Background download progress/state for the model file.
@@ -48,6 +51,7 @@ impl AppState {
             busy: Arc::new(Mutex::new(HashMap::new())),
             settings: RwLock::new(settings),
             http: build_http_client(),
+            translate_cancels: Mutex::new(HashMap::new()),
             local: Arc::new(tokio::sync::Mutex::new(None)),
             model: Arc::new(Mutex::new(crate::translate::local::ModelDownload::default())),
             next_terminal_id: AtomicU64::new(1),
