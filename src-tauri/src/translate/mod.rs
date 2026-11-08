@@ -54,21 +54,17 @@ pub fn is_cjk_char(c: char) -> bool {
     )
 }
 
-/// Splits text into chunks of at most `max` runes, preferring whitespace /
-/// newline boundaries (ported from the proven Go proxy implementation).
+/// Splits text into chunks of at most `max` runes. Cuts prefer paragraph or
+/// sentence boundaries, so a sentence is not split when a boundary is
+/// available; clause punctuation and whitespace are fallbacks, and only an
+/// unpunctuated run is cut mid-text.
 pub fn chunk(text: &str, max: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut runes: Vec<char> = text.chars().collect();
     while runes.len() > max {
-        let mut cut = max;
-        for i in (0..max).rev() {
-            if runes[i] == '\n' || runes[i] == ' ' {
-                cut = i + 1; // boundary char stays with this chunk
-                break;
-            }
-        }
+        let cut = chunk_cut(&runes, max);
         chunks.push(runes[..cut].iter().collect());
-        runes = runes[cut..].to_vec();
+        runes.drain(..cut);
     }
     if !runes.is_empty() {
         chunks.push(runes.iter().collect());
@@ -77,6 +73,93 @@ pub fn chunk(text: &str, max: usize) -> Vec<String> {
         chunks.push(String::new());
     }
     chunks
+}
+
+/// Cut index for one chunk: the rightmost newline or sentence end in the
+/// window; failing that, a sentence end a little past the limit (so a long
+/// sentence still ends cleanly), then a clause boundary or whitespace.
+fn chunk_cut(chars: &[char], max: usize) -> usize {
+    let window = max.min(chars.len());
+    let floor = 16.min(window); // avoid pathological one-word chunks
+    let mut best: Option<(u8, usize)> = None; // (priority, cut); lower wins
+    for i in (floor..window).rev() {
+        let Some((prio, cut)) = boundary_at(chars, i, window) else {
+            continue;
+        };
+        if best.is_none_or(|(p, _)| prio < p) {
+            best = Some((prio, cut));
+            if prio == 1 {
+                break; // nothing better exists
+            }
+        }
+    }
+    if best.is_none_or(|(p, _)| p > 1) {
+        // No sentence boundary fits: allow the chunk to overshoot by up to
+        // half a window to finish the sentence, rather than breaking it at
+        // a clause or a space.
+        let slack_end = (window + max / 2).min(chars.len());
+        for i in window..slack_end {
+            if let Some((1, cut)) = boundary_at(chars, i, slack_end) {
+                return cut;
+            }
+        }
+    }
+    best.map(|(_, cut)| cut).unwrap_or(window)
+}
+
+/// Classifies one boundary character. Priorities: 1 = newline / sentence
+/// end, 2 = clause punctuation, 3 = whitespace. The cut consumes trailing
+/// closing quotes and spaces so the next chunk starts clean.
+fn boundary_at(chars: &[char], i: usize, window: usize) -> Option<(u8, usize)> {
+    let c = chars[i];
+    if c == '\n' {
+        return Some((1, i + 1));
+    }
+    if is_sentence_end(c) {
+        let after = skip_closing(chars, i + 1);
+        // ASCII terminators only count when the sentence really ends here
+        // (not inside "3.14" or "a.b").
+        if c.is_ascii() && !chars.get(after).is_none_or(|n| n.is_whitespace()) {
+            return None;
+        }
+        return Some((1, skip_spaces(chars, after).min(window)));
+    }
+    if is_clause(c) {
+        let after = skip_closing(chars, i + 1);
+        // Likewise for "12:30" and "a,b".
+        if c.is_ascii() && !chars.get(after).is_none_or(|n| n.is_whitespace()) {
+            return None;
+        }
+        return Some((2, skip_spaces(chars, after).min(window)));
+    }
+    if c == ' ' || c == '\t' {
+        return Some((3, i + 1));
+    }
+    None
+}
+
+fn is_sentence_end(c: char) -> bool {
+    matches!(c, '。' | '！' | '？' | '…' | '.' | '!' | '?')
+}
+
+fn is_clause(c: char) -> bool {
+    matches!(c, '，' | '、' | '；' | '：' | ',' | ';' | ':')
+}
+
+fn skip_closing(chars: &[char], mut j: usize) -> usize {
+    while j < chars.len()
+        && matches!(chars[j], '"' | '”' | '’' | '」' | '』' | '）' | ')' | ']' | '】' | '》')
+    {
+        j += 1;
+    }
+    j
+}
+
+fn skip_spaces(chars: &[char], mut j: usize) -> usize {
+    while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
+        j += 1;
+    }
+    j
 }
 
 // ---------- code protection ----------
@@ -472,6 +555,71 @@ mod tests {
     fn chunk_small_and_empty() {
         assert_eq!(chunk("hi", 800), vec!["hi".to_string()]);
         assert_eq!(chunk("", 800), vec![String::new()]);
+    }
+
+    #[test]
+    fn chunk_does_not_split_sentences() {
+        // CJK: every cut lands right after a sentence terminator.
+        let zh = "这是第一句话。这是第二句话！这是第三句话？".repeat(40);
+        let chunks = chunk(&zh, 50);
+        assert!(chunks.len() > 2);
+        for c in &chunks[..chunks.len() - 1] {
+            let last = c.chars().last().unwrap();
+            assert!(
+                matches!(last, '。' | '！' | '？'),
+                "chunk ends mid-sentence: {c:?}"
+            );
+        }
+
+        // English: same, accounting for the trailing space the cut may include.
+        let en = "This is one sentence. This is another sentence! Is this a third? Yes. ".repeat(30);
+        let chunks = chunk(&en, 60);
+        assert!(chunks.len() > 2);
+        for c in &chunks[..chunks.len() - 1] {
+            let end = c.trim_end();
+            assert!(
+                matches!(end.chars().last(), Some('.' | '!' | '?')),
+                "chunk ends mid-sentence: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_falls_back_to_clauses_then_whitespace() {
+        // No sentence terminators: clause punctuation is the best cut.
+        let clauses = "这是一个很长的句子，它没有句号只有逗号，而且还在继续，".repeat(30);
+        let chunks = chunk(&clauses, 60);
+        for c in &chunks[..chunks.len() - 1] {
+            assert!(c.trim_end().ends_with('，'), "expected a clause cut: {c:?}");
+        }
+
+        // Only spaces: cut at a space rather than mid-word.
+        let words = "word ".repeat(40);
+        let chunks = chunk(&words, 60);
+        for c in &chunks[..chunks.len() - 1] {
+            assert!(c.ends_with(' '), "expected a whitespace cut: {c:?}");
+        }
+    }
+
+    #[test]
+    fn chunk_extends_past_the_limit_to_finish_a_long_sentence() {
+        // One sentence longer than the 800-char limit: cut at its end, even
+        // though that overshoots, instead of breaking at a space.
+        let text = format!("{} tail.", "word ".repeat(200));
+        let chunks = chunk(&text, 800);
+        assert!(chunks[0].chars().count() > 800);
+        assert!(chunks[0].trim_end().ends_with('.'));
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn chunk_ignores_periods_inside_words() {
+        // "1.2.3" must not look like a sentence end.
+        let text = "1.2.3 ".repeat(300);
+        let chunks = chunk(&text, 800);
+        for c in &chunks[..chunks.len() - 1] {
+            assert!(c.ends_with(' '), "cut inside a dotted token: {c:?}");
+        }
     }
 
     #[test]
