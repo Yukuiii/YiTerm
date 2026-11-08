@@ -3,7 +3,7 @@ use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex}};
 use serde::Serialize;
 use tauri::Emitter;
 
-use super::{parse_line, ChatMsg};
+use super::{parse_line, ChatMsg, SKIP_USER_PREFIXES};
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
 
@@ -54,6 +54,10 @@ pub fn spawn_follower(
         let mut historical = true;
         // key → last emitted JSON; dedupes streaming snapshot re-emissions.
         let mut emitted: HashMap<String, String> = HashMap::new();
+        // Busy events are suppressed while replaying history; only the final
+        // state of the first batch is emitted, so resuming an idle session
+        // doesn't flash a running spinner through its old turns.
+        let mut live = false;
 
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -104,7 +108,7 @@ pub fn spawn_follower(
                         let prev = map.insert(conv_id.clone(), running);
                         prev != Some(running)
                     };
-                    if changed {
+                    if changed && live {
                         let _ = app.emit(
                             "conversation-busy",
                             ConversationBusy {
@@ -124,6 +128,19 @@ pub fn spawn_follower(
                         }
                     }
                 }
+            }
+
+            if !live {
+                if let Some(running) = busy.lock().unwrap().get(&conv_id).copied() {
+                    let _ = app.emit(
+                        "conversation-busy",
+                        ConversationBusy {
+                            conversation_id: conv_id.clone(),
+                            busy: running,
+                        },
+                    );
+                }
+                live = true;
             }
 
             if !upserts.is_empty() {
@@ -176,6 +193,19 @@ fn turn_state(v: &serde_json::Value) -> Option<bool> {
                 return None;
             }
             let content = v.pointer("/message/content")?;
+            // Pressing Esc writes this marker instead of an assistant
+            // `end_turn`, so it must close the running turn.
+            if let Some(text) = content.as_str() {
+                let text = text.trim_start();
+                if text.starts_with("[Request interrupted by user") {
+                    return Some(false);
+                }
+                // Slash-command machinery (/list-agents, /model, …) is a
+                // synthetic user line with no assistant turn behind it.
+                if SKIP_USER_PREFIXES.iter().any(|p| text.starts_with(p)) {
+                    return None;
+                }
+            }
             let is_prompt = match content {
                 serde_json::Value::String(_) => true,
                 // Array prompts carry image blocks; arrays of tool_result do
@@ -237,5 +267,28 @@ mod tests {
         );
         // Unrelated line types are ignored.
         assert_eq!(turn_state(&json!({"type":"system"})), None);
+        // Interrupting a turn closes it without an assistant end_turn.
+        assert_eq!(
+            turn_state(&json!({
+                "type":"user",
+                "message":{"content":"[Request interrupted by user]"}
+            })),
+            Some(false)
+        );
+        // Slash commands are local machinery, not Claude turns.
+        assert_eq!(
+            turn_state(&json!({
+                "type":"user",
+                "message":{"content":"<command-name>/list-agents</command-name>"}
+            })),
+            None
+        );
+        assert_eq!(
+            turn_state(&json!({
+                "type":"user",
+                "message":{"content":"<local-command-stdout>ok</local-command-stdout>"}
+            })),
+            None
+        );
     }
 }
