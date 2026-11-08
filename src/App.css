@@ -930,6 +930,7 @@ button, input, textarea { font-family: inherit; }
 
 .composer-icon-btn {
   flex: none;
+  align-self: center;
   width: 32px;
   height: 32px;
   display: flex;

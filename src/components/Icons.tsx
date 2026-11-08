@@ -163,7 +163,7 @@ export const SpinnerIcon = ({ size = 16 }: { size?: number }) => (
 
 export const PaperclipIcon = ({ size = 16 }: { size?: number }) => (
   <Icon size={size}>
-    <path d="M21 12.5 12.5 21a5 5 0 0 1-7-7l8-8a3.5 3.5 0 0 1 5 5l-8 8a2 2 0 0 1-2.8-2.8l7.3-7.3" />
+    <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
   </Icon>
 );
 
