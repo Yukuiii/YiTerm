@@ -1,6 +1,8 @@
 pub mod chat;
+pub mod deepl;
 pub mod google;
 pub mod local;
+pub mod oneshot;
 
 use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
@@ -28,10 +30,19 @@ impl Direction {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum TranslateEvent {
     /// Incremental text appended since the previous delta.
-    Delta { request_id: String, text: String },
+    Delta {
+        request_id: String,
+        text: String,
+    },
     /// Terminal state; carries the full translation.
-    Done { request_id: String, text: String },
-    Error { request_id: String, message: String },
+    Done {
+        request_id: String,
+        text: String,
+    },
+    Error {
+        request_id: String,
+        message: String,
+    },
 }
 
 /// True if the string contains Han / Hiragana / Katakana / Hangul.
@@ -73,6 +84,61 @@ pub fn chunk(text: &str, max: usize) -> Vec<String> {
         chunks.push(String::new());
     }
     chunks
+}
+
+/// Like [`chunk`], but `max` is measured in UTF-16 code units — the limit the
+/// anonymous DeepL endpoint and DeepLX-style gateways enforce (an astral
+/// character counts as two). Cuts still prefer sentence boundaries, but never
+/// overshoot the cap: a rejected request would fail the whole translation.
+pub fn chunk_utf16(text: &str, max: usize) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let mut units = 0;
+        let mut end = start;
+        while end < chars.len() {
+            let next = chars[end].len_utf16();
+            if units + next > max {
+                break;
+            }
+            units += next;
+            end += 1;
+        }
+        if end == chars.len() {
+            chunks.push(chars[start..].iter().collect());
+            break;
+        }
+        // Best boundary before the cap; `end` itself when the window holds no
+        // punctuation or whitespace. Always advance to make progress.
+        let cut = chunk_cut_within(&chars, start, end).max(start + 1);
+        chunks.push(chars[start..cut].iter().collect());
+        start = cut;
+    }
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+    chunks
+}
+
+/// Rightmost best-priority boundary in `[start, end)`, never past `end`.
+/// Mirrors [`chunk_cut`] without its sentence overshoot.
+fn chunk_cut_within(chars: &[char], start: usize, end: usize) -> usize {
+    let window = end - start;
+    let floor = 16.min(window);
+    let mut best: Option<(u8, usize)> = None; // (priority, cut); lower wins
+    for i in (start + floor..end).rev() {
+        let Some((prio, cut)) = boundary_at(chars, i, end) else {
+            continue;
+        };
+        if best.is_none_or(|(p, _)| prio < p) {
+            best = Some((prio, cut));
+            if prio == 1 {
+                break;
+            }
+        }
+    }
+    best.map(|(_, cut)| cut).unwrap_or(end)
 }
 
 /// Cut index for one chunk: the rightmost newline or sentence end in the
@@ -148,7 +214,10 @@ fn is_clause(c: char) -> bool {
 
 fn skip_closing(chars: &[char], mut j: usize) -> usize {
     while j < chars.len()
-        && matches!(chars[j], '"' | '”' | '’' | '」' | '』' | '）' | ')' | ']' | '】' | '》')
+        && matches!(
+            chars[j],
+            '"' | '”' | '’' | '」' | '』' | '）' | ')' | ']' | '】' | '》'
+        )
     {
         j += 1;
     }
@@ -480,7 +549,25 @@ pub async fn run(
                 http,
                 &base,
                 &model,
-                if api_key.is_empty() { None } else { Some(&api_key) },
+                if api_key.is_empty() {
+                    None
+                } else {
+                    Some(&api_key)
+                },
+                direction,
+                text,
+                request_id,
+                channel,
+            )
+            .await
+        }
+        "deepl" => {
+            let protocol = deepl::protocol(settings.deepl_protocol.as_deref());
+            deepl::translate(
+                http,
+                api_key.unwrap_or_default(),
+                settings.deepl_api_url.as_deref(),
+                protocol,
                 direction,
                 text,
                 request_id,
@@ -549,7 +636,10 @@ mod tests {
         let cjk = "你".repeat(2000);
         let chunks = chunk(&cjk, 800);
         assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks.iter().map(|c| c.chars().count()).sum::<usize>(), 2000);
+        assert_eq!(
+            chunks.iter().map(|c| c.chars().count()).sum::<usize>(),
+            2000
+        );
     }
 
     #[test]
@@ -573,7 +663,8 @@ mod tests {
         }
 
         // English: same, accounting for the trailing space the cut may include.
-        let en = "This is one sentence. This is another sentence! Is this a third? Yes. ".repeat(30);
+        let en =
+            "This is one sentence. This is another sentence! Is this a third? Yes. ".repeat(30);
         let chunks = chunk(&en, 60);
         assert!(chunks.len() > 2);
         for c in &chunks[..chunks.len() - 1] {
@@ -621,6 +712,42 @@ mod tests {
         for c in &chunks[..chunks.len() - 1] {
             assert!(c.ends_with(' '), "cut inside a dotted token: {c:?}");
         }
+    }
+
+    #[test]
+    fn chunk_utf16_counts_surrogate_pairs() {
+        // 1000 emoji = 2000 UTF-16 units, but only 1000 chars.
+        let text = "😀".repeat(1000);
+        let chunks = chunk_utf16(&text, 1400);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks.concat(), text);
+        for c in &chunks {
+            assert!(c.encode_utf16().count() <= 1400, "chunk over the cap");
+        }
+    }
+
+    #[test]
+    fn chunk_utf16_never_overshoots_and_prefers_sentences() {
+        let zh = "这是第一句话。这是第二句话！这是第三句话？".repeat(40);
+        let chunks = chunk_utf16(&zh, 50);
+        assert!(chunks.len() > 2);
+        for c in &chunks {
+            assert!(c.encode_utf16().count() <= 50, "chunk over the cap: {c:?}");
+        }
+        assert_eq!(chunks.concat(), zh);
+        for c in &chunks[..chunks.len() - 1] {
+            let last = c.chars().last().unwrap();
+            assert!(
+                matches!(last, '。' | '！' | '？'),
+                "chunk ends mid-sentence: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_utf16_handles_empty_and_short_text() {
+        assert_eq!(chunk_utf16("", 1400), vec![String::new()]);
+        assert_eq!(chunk_utf16("hi", 1400), vec!["hi".to_string()]);
     }
 
     #[test]

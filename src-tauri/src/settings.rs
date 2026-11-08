@@ -21,6 +21,14 @@ pub struct TranslationSettings {
     pub chat_provider: String,
     pub chat_base_url: Option<String>,
     pub chat_model_id: Option<String>,
+    /// Custom DeepL-compatible endpoint; empty/None → free/pro host chosen
+    /// from the key suffix.
+    #[serde(default)]
+    pub deepl_api_url: Option<String>,
+    /// "deepl" (official API), "deeplx" (DeepLX-compatible gateway), or
+    /// "oneshot" (built-in anonymous channel, no key or gateway).
+    #[serde(default)]
+    pub deepl_protocol: Option<String>,
 }
 
 fn default_chat_provider() -> String {
@@ -43,6 +51,8 @@ impl Default for TranslationSettings {
             chat_provider: default_chat_provider(),
             chat_base_url: None,
             chat_model_id: None,
+            deepl_api_url: None,
+            deepl_protocol: None,
         }
     }
 }
@@ -186,11 +196,7 @@ pub fn api_key_get(config_dir: &Path, provider: &str) -> Option<String> {
         .filter(|k| !k.trim().is_empty())
 }
 
-pub fn api_key_set(
-    config_dir: &Path,
-    provider: &str,
-    key: Option<String>,
-) -> Result<(), String> {
+pub fn api_key_set(config_dir: &Path, provider: &str, key: Option<String>) -> Result<(), String> {
     let mut keys = read_keys(config_dir);
     let provider = provider.trim();
     match key {

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{ipc::Channel, Emitter, State};
+use tauri::{Emitter, State, ipc::Channel};
 
 use crate::{
-    sessions::{self, follower, Conversation},
+    sessions::{self, Conversation, follower},
     state::AppState,
     terminal::TerminalHandle,
     translate::{self, Direction, TranslateEvent},
@@ -135,9 +135,9 @@ pub async fn terminal_start(
     // links and guards against concurrent duplicate starts.
     {
         let terms = state.terms.read().unwrap();
-        let alive = terms.values().find(|t| {
-            t.conv_id == req.conversation_id && !*t.exited.lock().unwrap()
-        });
+        let alive = terms
+            .values()
+            .find(|t| t.conv_id == req.conversation_id && !*t.exited.lock().unwrap());
         if let Some(t) = alive {
             return Ok(TerminalStartInfo {
                 conversation_id: t.conv_id.clone(),
@@ -424,13 +424,21 @@ pub fn conversations_create(
         created_at: now_iso(),
         imported: false,
     };
-    state.convs.write().unwrap().insert(conv.id.clone(), conv.clone());
+    state
+        .convs
+        .write()
+        .unwrap()
+        .insert(conv.id.clone(), conv.clone());
     state.persist_conversations(&app);
     Ok(conv)
 }
 
 #[tauri::command]
-pub fn conversations_delete(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub fn conversations_delete(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
     let conv = state.convs.write().unwrap().remove(&id);
     if let Some(conv) = &conv {
         if let Some(tid) = conv.terminal_id {
@@ -483,10 +491,17 @@ pub fn current_user() -> String {
 
 /// conv ids are UUIDs we generate; reject anything path-ish defensively.
 fn valid_conv_id(conv_id: &str) -> bool {
-    !conv_id.is_empty() && conv_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    !conv_id.is_empty()
+        && conv_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-fn chat_path(app: &tauri::AppHandle, state: &AppState, conv_id: &str) -> Result<std::path::PathBuf, String> {
+fn chat_path(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    conv_id: &str,
+) -> Result<std::path::PathBuf, String> {
     if !valid_conv_id(conv_id) {
         return Err("invalid conversation id".into());
     }
@@ -646,8 +661,7 @@ pub fn chat_attachment_import(
     // Read the magic bytes (a single `read` may return fewer than requested).
     let mut head = [0u8; 12];
     let mut filled = 0;
-    let mut file =
-        std::fs::File::open(&src).map_err(|e| format!("读取附件失败: {e}"))?;
+    let mut file = std::fs::File::open(&src).map_err(|e| format!("读取附件失败: {e}"))?;
     while filled < head.len() {
         match file.read(&mut head[filled..]) {
             Ok(0) => break,
@@ -743,22 +757,17 @@ pub async fn translate(
 ) -> Result<String, String> {
     let settings = state.settings.read().unwrap().clone();
     if settings.translation.mode == "local" {
-        return translate::local::translate(
-            &app,
-            &state,
-            direction,
-            &text,
-            &request_id,
-            &channel,
-        )
-        .await;
+        return translate::local::translate(&app, &state, direction, &text, &request_id, &channel)
+            .await;
     }
     let http = state.http.clone();
-    let api_key = if settings.translation.mode == "chat" {
-        crate::settings::api_key_get(
-            &state.config_dir(&app),
-            &settings.translation.chat_provider,
-        )
+    let key_provider = if settings.translation.mode == "deepl" {
+        "deepl".to_string()
+    } else {
+        settings.translation.chat_provider.clone()
+    };
+    let api_key = if matches!(settings.translation.mode.as_str(), "chat" | "deepl") {
+        crate::settings::api_key_get(&state.config_dir(&app), &key_provider)
     } else {
         None
     };
@@ -794,10 +803,7 @@ pub fn model_download(app: tauri::AppHandle) -> Result<(), String> {
 
 /// Deletes the model file and unloads the in-memory translator.
 #[tauri::command]
-pub async fn model_delete(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn model_delete(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     translate::local::delete_model(&app, &state).await
 }
 
@@ -863,9 +869,24 @@ mod tests {
     fn eviction_prefers_the_oldest_idle_terminal() {
         let now = 1_000_000;
         let terminals = vec![
-            TerminalSnapshot { id: 1, conv_id: "a".into(), last_output_ms: now - 60_000, exited: false },
-            TerminalSnapshot { id: 2, conv_id: "b".into(), last_output_ms: now - 10_000, exited: false },
-            TerminalSnapshot { id: 3, conv_id: "c".into(), last_output_ms: now - 1_000, exited: false },
+            TerminalSnapshot {
+                id: 1,
+                conv_id: "a".into(),
+                last_output_ms: now - 60_000,
+                exited: false,
+            },
+            TerminalSnapshot {
+                id: 2,
+                conv_id: "b".into(),
+                last_output_ms: now - 10_000,
+                exited: false,
+            },
+            TerminalSnapshot {
+                id: 3,
+                conv_id: "c".into(),
+                last_output_ms: now - 1_000,
+                exited: false,
+            },
         ];
         let busy = std::collections::HashMap::new();
         assert_eq!(
@@ -878,9 +899,24 @@ mod tests {
     fn eviction_skips_busy_and_recently_printing_terminals() {
         let now = 1_000_000;
         let terminals = vec![
-            TerminalSnapshot { id: 1, conv_id: "busy".into(), last_output_ms: now - 60_000, exited: false },
-            TerminalSnapshot { id: 2, conv_id: "recent".into(), last_output_ms: now - 1_000, exited: false },
-            TerminalSnapshot { id: 3, conv_id: "idle".into(), last_output_ms: now - 30_000, exited: false },
+            TerminalSnapshot {
+                id: 1,
+                conv_id: "busy".into(),
+                last_output_ms: now - 60_000,
+                exited: false,
+            },
+            TerminalSnapshot {
+                id: 2,
+                conv_id: "recent".into(),
+                last_output_ms: now - 1_000,
+                exited: false,
+            },
+            TerminalSnapshot {
+                id: 3,
+                conv_id: "idle".into(),
+                last_output_ms: now - 30_000,
+                exited: false,
+            },
         ];
         let busy = std::collections::HashMap::from([("busy".to_string(), true)]);
         assert_eq!(
@@ -893,8 +929,18 @@ mod tests {
     fn eviction_never_touches_the_active_conversation() {
         let now = 1_000_000;
         let terminals = vec![
-            TerminalSnapshot { id: 1, conv_id: "active".into(), last_output_ms: now - 60_000, exited: false },
-            TerminalSnapshot { id: 2, conv_id: "dead".into(), last_output_ms: now - 1_000, exited: true },
+            TerminalSnapshot {
+                id: 1,
+                conv_id: "active".into(),
+                last_output_ms: now - 60_000,
+                exited: false,
+            },
+            TerminalSnapshot {
+                id: 2,
+                conv_id: "dead".into(),
+                last_output_ms: now - 1_000,
+                exited: true,
+            },
         ];
         let busy = std::collections::HashMap::new();
         // The active live terminal is skipped; the dead one can go.

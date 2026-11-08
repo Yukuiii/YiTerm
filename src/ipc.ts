@@ -21,11 +21,13 @@ export interface ConversationsOverview {
 }
 
 export interface TranslationSettings {
-  mode: 'google' | 'chat' | 'local';
+  mode: 'google' | 'chat' | 'local' | 'deepl';
   targetZh: string;
   chatProvider: 'custom' | 'siliconflow' | 'openrouter';
   chatBaseUrl: string | null;
   chatModelId: string | null;
+  deeplApiUrl: string | null;
+  deeplProtocol: 'deepl' | 'deeplx' | 'oneshot' | null;
 }
 
 export interface TerminalSettings {

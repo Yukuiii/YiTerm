@@ -41,9 +41,11 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 - **Attachments** — paste screenshots or attach images and files from disk;
   images are sent to Claude as images, other files are referenced by path
 - **Streaming translation** zh → en and en → zh
-  - Google's free endpoints out of the box; built-in presets for SiliconFlow
-    and OpenRouter (endpoint and model pre-filled — just paste an API key);
-    or any OpenAI-compatible chat API
+  - Google's free endpoints out of the box; DeepL with an API key (free tier:
+    500k chars/month) or the built-in anonymous DeepL channel (no key, no
+    self-hosted gateway; rate-limited); built-in presets for SiliconFlow and
+    OpenRouter (endpoint and model pre-filled — just paste an API key); or any
+    OpenAI-compatible chat API
   - **Fully offline local mode**: Tencent's Hy-MT2-1.8B runs on CPU inside the
     app (no Ollama, no API key). The Q3_K_M model (~907 MB) is downloaded on
     demand from Settings — nothing downloads automatically at launch.
@@ -90,8 +92,9 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 - Node.js 22+
 - Rust 1.90+
 - [Claude Code](https://github.com/anthropics/claude-code) installed and authenticated (`claude`)
-- Network access to Google Translate endpoints or an OpenAI-compatible provider
-  (not needed in local mode once the model has been downloaded from Settings)
+- Network access to Google Translate endpoints, DeepL, or an OpenAI-compatible
+  provider (not needed in local mode once the model has been downloaded from
+  Settings)
 
 ## Getting started
 
@@ -116,9 +119,12 @@ YiTerm auto-detects `claude` in `~/.local/bin` or on `PATH`. You can point it at
 
 ## Configuration
 
-- **Translation mode** — Google free endpoints (no key); built-in chat presets
-  for SiliconFlow / OpenRouter (paste an API key) or any OpenAI-compatible Chat
-  API; or the embedded Hy-MT2-1.8B model (offline, CPU-only).
+- **Translation mode** — Google free endpoints (no key); DeepL (official API
+  with a key; free keys end in `:fx` and use the free host; a custom
+  `/v2/translate` URL is supported; or the built-in anonymous channel, which
+  needs neither a key nor a gateway but is rate-limited); built-in chat presets
+  for SiliconFlow / OpenRouter or any OpenAI-compatible Chat API; or the
+  embedded Hy-MT2-1.8B model (offline, CPU-only).
   The local model lives in `models/Hy-MT2-1.8B.Q3_K_M.gguf` under the app data
   directory (`~/Library/Application Support/com.yiterm.app` on macOS,
   `%LOCALAPPDATA%\com.yiterm.app` on Windows) and is downloaded from Settings.
@@ -139,11 +145,13 @@ YiTerm auto-detects `claude` in `~/.local/bin` or on `PATH`. You can point it at
 - macOS only for now.
 - The chat mirror depends on Claude Code's JSONL transcript format; parser updates may be needed if that format changes.
 - Free Google endpoints can be rate-limited or unreachable without a proxy; use a proxy or Chat mode.
+- The built-in DeepL free channel talks to DeepL's client endpoint anonymously; it is unofficial, rate-limited, and may stop working when DeepL changes its apps.
 - Machine translation is approximate — review important technical text before relying on it.
 
 ## Credits
 
 - Terminal typeface: [Ioskeley Mono](https://github.com/ahatem/IoskeleyMono) — SIL Open Font License 1.1 (`src/assets/fonts/OFL.txt`).
+- The built-in DeepL free channel follows the anonymous iOS request profile implemented by [DLX](https://github.com/OwO-Network/DLX) (formerly DeepLX) — MIT licensed.
 
 ## License
 

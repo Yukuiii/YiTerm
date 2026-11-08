@@ -10,13 +10,21 @@ import {
   type ModelStatus,
   type Settings,
   type TerminalSettings,
+  type TranslationSettings,
 } from '../ipc';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { useSettingsStore } from '../stores/settings';
+import Dropdown from './Dropdown';
 
 const fmtMB = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
 
 const DEFAULT_TERMINAL: TerminalSettings = { fontFamily: null, fontSize: 13, lineHeight: 1.1 };
+
+const DEEPL_PROTOCOL_OPTIONS: { value: 'deepl' | 'deeplx' | 'oneshot'; label: string }[] = [
+  { value: 'deepl', label: 'DeepL 官方格式' },
+  { value: 'deeplx', label: 'DeepLX 网关（text 为字符串）' },
+  { value: 'oneshot', label: '内置免费通道（无需 Key）' },
+];
 
 type ChatProviderId = 'siliconflow' | 'openrouter' | 'custom';
 
@@ -59,6 +67,9 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   // Provider is stored per key, so the "saved" state follows the draft.
   const activeChatProvider: ChatProviderId =
     current?.translation.chatProvider ?? 'custom';
+  // DeepL has its own key slot; chat mode keys follow the selected provider.
+  const activeKeyProvider =
+    current?.translation.mode === 'deepl' ? 'deepl' : activeChatProvider;
 
   // Status is best-effort; on failure the section simply stays blank.
   const refreshModel = useCallback(() => {
@@ -69,7 +80,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     let alive = true;
-    apiKeyGet(activeChatProvider)
+    apiKeyGet(activeKeyProvider)
       .then((key) => {
         if (alive) setHasKey(!!key);
       })
@@ -77,7 +88,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
     return () => {
       alive = false;
     };
-  }, [activeChatProvider]);
+  }, [activeKeyProvider]);
 
   useEffect(() => {
     refreshModel();
@@ -106,6 +117,8 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const t = current.translation;
   // Typography is tuned by eye: apply terminal changes immediately and persist
   // them without waiting for the bottom 保存 button.
+  const patchTranslation = (patch: Partial<TranslationSettings>) =>
+    setDraft({ ...current, translation: { ...t, ...patch } });
   const updateTerminal = (patch: Partial<TerminalSettings>) => {
     const terminal = { ...(current.terminal ?? DEFAULT_TERMINAL), ...patch };
     setDraft({ ...current, terminal });
@@ -120,6 +133,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   };
   const chatProvider: ChatProviderId = t.chatProvider ?? 'custom';
   const providerPreset = chatProvider === 'custom' ? null : CHAT_PROVIDERS[chatProvider];
+  const deeplProtocol = t.deeplProtocol ?? 'deepl';
 
   /** Selecting a known provider pre-fills its endpoint and a default model. */
   const pickChatProvider = (id: ChatProviderId) => {
@@ -139,7 +153,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const saveAll = async () => {
     await save(current);
     if (apiKeyDraft.trim()) {
-      await apiKeySet(apiKeyDraft.trim(), activeChatProvider);
+      await apiKeySet(apiKeyDraft.trim(), activeKeyProvider);
       setApiKeyDraft('');
       setHasKey(true);
     }
@@ -154,7 +168,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
     // Apply the draft first so the backend uses it, then test.
     await save(current);
     if (apiKeyDraft.trim()) {
-      await apiKeySet(apiKeyDraft.trim(), activeChatProvider);
+      await apiKeySet(apiKeyDraft.trim(), activeKeyProvider);
       setApiKeyDraft('');
       setHasKey(true);
     }
@@ -210,6 +224,20 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
             <div>
               <div className="radio-title">Google 翻译（内置）</div>
               <div className="radio-desc">免 Key，使用 Google 免费端点；可能遇到限流</div>
+            </div>
+          </label>
+          <label className="radio-row">
+            <input
+              type="radio"
+              name="mode"
+              checked={t.mode === 'deepl'}
+              onChange={() => setDraft({ ...current, translation: { ...t, mode: 'deepl' } })}
+            />
+            <div>
+              <div className="radio-title">DeepL 翻译</div>
+              <div className="radio-desc">
+                官方 API（免费 Key 每月 50 万字符），或内置免费通道，无需 Key
+              </div>
             </div>
           </label>
           <label className="radio-row">
@@ -275,8 +303,10 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                 />
               </label>
               <label>
-                API Key{providerPreset ? `（${providerPreset.label}）` : ''}{' '}
-                {hasKey && <span className="key-badge">已保存</span>}
+                <span className="field-label">
+                  API Key{providerPreset ? `（${providerPreset.label}）` : ''}
+                  {hasKey && <span className="key-badge">已保存</span>}
+                </span>
                 <input
                   type="password"
                   placeholder={hasKey ? '（已保存，输入可覆盖）' : 'sk-…'}
@@ -288,12 +318,78 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                 <button
                   className="ghost-btn"
                   onClick={async () => {
-                    await apiKeySet(null, chatProvider);
+                    await apiKeySet(null, activeKeyProvider);
                     setHasKey(false);
                   }}
                 >
                   清除已保存的 API Key
                 </button>
+              )}
+            </div>
+          )}
+
+          {t.mode === 'deepl' && (
+            <div className="chat-config">
+              <label>
+                协议
+                <Dropdown
+                  value={deeplProtocol}
+                  options={DEEPL_PROTOCOL_OPTIONS}
+                  onChange={(v) => patchTranslation({ deeplProtocol: v })}
+                />
+              </label>
+              <div className="radio-desc">
+                {deeplProtocol === 'oneshot'
+                  ? '直接调用 DeepL App 的匿名接口，不需要 API Key，也不需要自建 DLX 服务。有频率限制，接口可能随 DeepL 更新失效。'
+                  : '官方格式自动使用 Authorization: DeepL-Auth-Key；DeepLX 网关自动使用 Authorization: Bearer（Key 通常已包含在地址中）。'}
+              </div>
+              {deeplProtocol !== 'oneshot' && (
+                <>
+                  <label>
+                    <span className="field-label">
+                      API Key（DeepLX 把 Key 放在地址里时可留空）
+                      {hasKey && <span className="key-badge">已保存</span>}
+                    </span>
+                    <input
+                      type="password"
+                      placeholder={
+                        hasKey ? '（已保存，输入可覆盖）' : 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx'
+                      }
+                      value={apiKeyDraft}
+                      onChange={(e) => setApiKeyDraft(e.target.value)}
+                    />
+                  </label>
+                  {hasKey && (
+                    <button
+                      className="ghost-btn"
+                      onClick={async () => {
+                        await apiKeySet(null, activeKeyProvider);
+                        setHasKey(false);
+                      }}
+                    >
+                      清除已保存的 API Key
+                    </button>
+                  )}
+                  <label>
+                    API 地址（留空自动判断）
+                    <input
+                      type="text"
+                      placeholder="https://api-free.deepl.com/v2/translate"
+                      value={t.deeplApiUrl ?? ''}
+                      onChange={(e) =>
+                        setDraft({
+                          ...current,
+                          translation: { ...t, deeplApiUrl: e.target.value || null },
+                        })
+                      }
+                    />
+                  </label>
+                  <div className="radio-desc">
+                    官方格式：:fx 免费 Key 走 api-free.deepl.com，其余走 api.deepl.com。DeepLX
+                    网关通常把 Key 放在地址里（如 api.deeplx.org/&lt;key&gt;/translate），请求体
+                    text 为字符串、返回 code/data。
+                  </div>
+                </>
               )}
             </div>
           )}

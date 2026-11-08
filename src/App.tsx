@@ -170,7 +170,11 @@ export default function App() {
         : 'Chat 翻译'
       : settings?.translation.mode === 'local'
         ? '本地翻译 · Hy-MT2-1.8B'
-        : 'Google 翻译';
+        : settings?.translation.mode === 'deepl'
+          ? settings.translation.deeplProtocol === 'oneshot'
+            ? 'DeepL 免费通道'
+            : 'DeepL 翻译'
+          : 'Google 翻译';
   const statusKind = !activeId
     ? 'idle'
     : exitCode !== undefined
