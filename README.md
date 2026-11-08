@@ -22,14 +22,20 @@
 
 ## Why YiTerm
 
-Claude Code is a great coding agent, but it works in English and its conversation lives in a terminal and a JSONL transcript. YiTerm wraps the real CLI in a desktop app and adds a bilingual layer around it:
+Claude Code is a great coding agent, but it works in English and its conversation lives in a terminal and a JSONL transcript. YiTerm wraps the real CLI in a desktop app and turns it into a Chinese-first workflow:
 
-- **Chinese in, English out** — your prompt is translated before it reaches Claude.
-- **English in, Chinese out** — assistant replies are followed from the session transcript and translated back as they arrive.
+- **Chinese in, English out** — your prompt is translated zh → en before it reaches Claude.
+- **English in, Chinese out** — assistant replies are followed from the session transcript and translated back en → zh as they stream in.
+- **Automatic both ways** — no copying text into a separate translator: the translation runs behind the composer, and the chat mirrors the real session.
+- **English is cheaper** — for the same meaning English uses fewer tokens than Chinese, so the English prompt also keeps Claude's context smaller. Text typed in English is sent as-is, skipping translation entirely.
 - **Still the real CLI** — YiTerm runs `claude` in a PTY with your existing login, tools, permissions, and MCP setup. No API proxy, no second Claude client.
 
 ## Features
 
+- **Chinese-first chat with Claude Code, fully automatic**
+  - Chinese prompt → translated to English → written into the real `claude` PTY
+  - English reply → mirrored from the JSONL transcript → translated back to Chinese as it arrives
+  - English input is sent as-is (no translation call); English prompts also cost fewer Claude tokens than Chinese for the same content
 - **Streaming translation** zh → en and en → zh
   - Google's free endpoints out of the box; built-in presets for SiliconFlow
     and OpenRouter (endpoint and model pre-filled — just paste an API key);
@@ -50,7 +56,7 @@ Claude Code is a great coding agent, but it works in English and its conversatio
   replayed history is shown as-is, while new replies are still translated
 - **Two layouts**: Code (chat + terminal) and Cowork (chat only)
 - **Persistence**: conversations, chat history, and translation settings
-- **API key in the macOS Keychain**
+- **API keys in the macOS Keychain** (one per chat provider)
 - **System proxy detection** via `scutil`, so translation works behind a local proxy
 - **Plain-text logs** in `~/Library/Logs/com.yiterm.app/`
 
@@ -69,7 +75,7 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 ```
 
 1. `terminal_start` spawns `claude --session-id <uuid>` (or `--resume <uuid>` when the transcript already exists) inside a PTY.
-2. Chinese text from the composer is translated zh → en and written to the terminal.
+2. Chinese text from the composer is translated zh → en and written to the terminal; text containing no Chinese is written as-is.
 3. A follower tails `~/.claude/projects/<munged-cwd>/<session-id>.jsonl` and emits parsed messages.
 4. Assistant messages are translated en → zh and streamed into the chat panel.
 5. Code spans are replaced with `@@C<n>@@` sentinels before translation and restored afterwards.
@@ -81,7 +87,7 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 - Rust 1.90+
 - [Claude Code](https://github.com/anthropics/claude-code) installed and authenticated (`claude`)
 - Network access to Google Translate endpoints or an OpenAI-compatible provider
-  (not needed in local mode after the model has been downloaded)
+  (not needed in local mode once the model has been downloaded from Settings)
 
 ## Getting started
 
@@ -106,13 +112,14 @@ YiTerm auto-detects `claude` in `~/.local/bin` or on `PATH`. You can point it at
 
 ## Configuration
 
-- **Translation mode** — Google free endpoints (no key), an OpenAI-compatible Chat API (Base URL, model, API key), or the embedded Hy-MT2-1.8B model (offline, CPU-only).
+- **Translation mode** — Google free endpoints (no key); built-in chat presets
+  for SiliconFlow / OpenRouter (paste an API key) or any OpenAI-compatible Chat
+  API; or the embedded Hy-MT2-1.8B model (offline, CPU-only).
   The local model lives in `models/Hy-MT2-1.8B.Q3_K_M.gguf` under the app data
   directory (`~/Library/Application Support/com.yiterm.app` on macOS,
-  `%LOCALAPPDATA%\com.yiterm.app` on Windows); a custom GGUF path can be set in
-  Settings.
+  `%LOCALAPPDATA%\com.yiterm.app` on Windows) and is downloaded from Settings.
 - **Target language** — replies are translated to Simplified Chinese (`zh-CN`).
-- **API key** — stored in the macOS Keychain, never in the repository.
+- **API keys** — stored in the macOS Keychain (separate key per chat provider), never in the repository.
 - **App data** — `~/Library/Application Support/com.yiterm.app/`
   - `settings.json`
   - `conversations.json`
