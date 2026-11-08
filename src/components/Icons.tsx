@@ -105,6 +105,13 @@ export const CheckIcon = ({ size = 16, className }: { size?: number; className?:
   </svg>
 );
 
+export const InfoIcon = ({ size = 16 }: { size?: number }) => (
+  <Icon size={size}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 11v6M12 7h.01" />
+  </Icon>
+);
+
 export const TerminalIcon = ({ size = 16 }: { size?: number }) => (
   <Icon size={size}>
     <path d="m5 7 5 5-5 5" />

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { getVersion } from '@tauri-apps/api/app';
 import {
   apiKeyGet,
   apiKeySet,
@@ -15,7 +16,7 @@ import {
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { useSettingsStore } from '../stores/settings';
 import Dropdown from './Dropdown';
-import { ChatIcon, SlidersIcon, TerminalIcon, XIcon } from './Icons';
+import { ChatIcon, InfoIcon, SlidersIcon, TerminalIcon, XIcon } from './Icons';
 
 const fmtMB = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
 
@@ -61,7 +62,10 @@ const SETTINGS_NAV = [
   },
   {
     group: '应用',
-    items: [{ id: 'general', label: '通用', Icon: SlidersIcon }],
+    items: [
+      { id: 'general', label: '通用', Icon: SlidersIcon },
+      { id: 'about', label: '关于', Icon: InfoIcon },
+    ],
   },
 ] as const;
 
@@ -72,6 +76,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   // Edits live in a draft; when untouched the loaded settings are the value.
   const [draft, setDraft] = useState<Settings | null>(null);
   const [tab, setTab] = useState<SettingsTab>('translation');
+  const [appVersion, setAppVersion] = useState('读取中…');
   const [apiKeyDraft, setApiKeyDraft] = useState('');
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
@@ -87,6 +92,20 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   // DeepL has its own key slot; chat mode keys follow the selected provider.
   const activeKeyProvider =
     current?.translation.mode === 'deepl' ? 'deepl' : activeChatProvider;
+
+  useEffect(() => {
+    let alive = true;
+    void getVersion()
+      .then((version) => {
+        if (alive) setAppVersion(version);
+      })
+      .catch(() => {
+        if (alive) setAppVersion('无法读取版本');
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Status is best-effort; on failure the section simply stays blank.
   const refreshModel = useCallback(() => {
@@ -232,9 +251,11 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
         <div className="settings-head">
           <h2>设置</h2>
           <div className="settings-head-actions">
-            <button className="primary-btn settings-save" onClick={() => void saveAll()}>
-              {saved ? '已保存 ✓' : '保存'}
-            </button>
+            {tab !== 'about' && (
+              <button className="primary-btn settings-save" onClick={() => void saveAll()}>
+                {saved ? '已保存 ✓' : '保存'}
+              </button>
+            )}
             <button className="icon-btn" onClick={onClose} aria-label="关闭设置">
               <XIcon size={16} />
             </button>
@@ -614,6 +635,20 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                       value={current.claudePath ?? ''}
                       onChange={(e) => setDraft({ ...current, claudePath: e.target.value || null })}
                     />
+                  </div>
+                </section>
+              </>
+            )}
+            {tab === 'about' && (
+              <>
+                <h2 className="settings-section-title">关于</h2>
+                <section>
+                  <div className="setting-row">
+                    <div className="setting-copy">
+                      <div className="setting-title">YiTerm</div>
+                      <div className="setting-desc">当前应用版本</div>
+                    </div>
+                    <span className="setting-title">{appVersion}</span>
                   </div>
                 </section>
               </>
