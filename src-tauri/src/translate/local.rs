@@ -34,12 +34,15 @@ pub const MODEL_URLS: [&str; 2] = [
 /// Size of the Q3_K_M build; used for progress until the server reports one.
 pub const MODEL_BYTES: u64 = 951_022_336;
 
-/// Greedy decoding is the standard for machine translation (matches the
-/// reference `hy-mt` CLI defaults).
-const MAX_NEW_TOKENS: usize = 1024;
-/// Chunks stay well inside the model's context; long replies translate
-/// progressively instead of risking a truncated tail.
-const CHUNK_MAX: usize = 1200;
+/// Upper bound for generated tokens per chunk. The actual budget scales with
+/// the prompt (see `translate_fragment`) so ordinary messages are never
+/// truncated, while very long ones stay bounded.
+const MAX_NEW_TOKENS: usize = 3072;
+/// Chunks are packed up to this many runes. Larger chunks mean fewer
+/// prefill pauses (each chunk pays a fresh prompt prefill), so most replies
+/// translate in one continuous stream. Pauses that remain fall on paragraph
+/// boundaries.
+const CHUNK_MAX: usize = 4000;
 /// Progress events are throttled so a fast download can't flood the IPC.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -86,7 +89,12 @@ impl LocalTranslator {
             temperature: 0.0,
             ..Default::default()
         };
-        let mut generator = Generator::new(&mut self.model, &self.tokenizer, params, MAX_NEW_TOKENS);
+        // Translation output token count tracks the input (Chinese output
+        // from English input can run ~1.5–2× the prompt's token count);
+        // scale the budget with the prompt instead of using a fixed cap
+        // that could truncate long chunks.
+        let max_new = (prompt.len() * 2).clamp(512, MAX_NEW_TOKENS);
+        let mut generator = Generator::new(&mut self.model, &self.tokenizer, params, max_new);
 
         let mut acc = String::new();
         let mut pending = String::new(); // may end inside a sentinel
@@ -534,21 +542,90 @@ fn translate_blocking(
     text: &str,
     emit: &mut dyn FnMut(&str),
 ) -> Result<String, String> {
-    // Swap code blocks / inline code for sentinels so they survive verbatim,
-    // then hide paragraph breaks the same way — the model otherwise collapses
-    // markdown paragraphs into single newlines.
+    // Swap code blocks / inline code for sentinels so they survive verbatim.
+    // Paragraph breaks are hidden per fragment below (this keeps "\n\n"
+    // visible here for paragraph-aware chunking).
     let (protected, mut blocks) = protect_code(text);
-    let protected = super::protect_breaks(&protected, &mut blocks);
+    let parts = chunk_paragraphs(&protected, CHUNK_MAX);
+    tracing::info!(
+        chars = text.chars().count(),
+        chunks = parts.len(),
+        "local translate started"
+    );
     let mut full = String::new();
-    for part in chunk(&protected, CHUNK_MAX) {
+    for (idx, part) in parts.into_iter().enumerate() {
         if part.trim().is_empty() {
             full.push_str(&part);
             continue;
         }
-        let translated = translator.translate_fragment(target, &part, &blocks, emit)?;
+        // Hide paragraph breaks the same way as code — the model otherwise
+        // collapses markdown paragraphs into single newlines.
+        let fragment = super::protect_breaks(&part, &mut blocks);
+        let t0 = Instant::now();
+        let translated = translator.translate_fragment(target, &fragment, &blocks, emit)?;
+        tracing::info!(
+            chunk = idx,
+            chars = part.chars().count(),
+            ms = t0.elapsed().as_millis() as u64,
+            "local chunk done"
+        );
         full.push_str(&translated);
     }
     Ok(full)
+}
+
+/// Splits protected text into chunks of at most `max` runes, preferring
+/// paragraph boundaries so any remaining prefill pause lands between
+/// paragraphs rather than mid-sentence. A tiny trailing chunk is merged into
+/// its predecessor (bounded overshoot of `max / 4`). Paragraphs longer than
+/// `max` fall back to whitespace splitting.
+fn chunk_paragraphs(text: &str, max: usize) -> Vec<String> {
+    if text.chars().count() <= max {
+        return vec![text.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    let mut buf_len = 0usize;
+    for para in text.split_inclusive("\n\n") {
+        let para_len = para.chars().count();
+        if para_len > max {
+            if !buf.is_empty() {
+                out.push(std::mem::take(&mut buf));
+                buf_len = 0;
+            }
+            out.extend(chunk(para, max));
+            continue;
+        }
+        if buf_len + para_len > max {
+            out.push(std::mem::take(&mut buf));
+            buf_len = 0;
+        }
+        buf.push_str(para);
+        buf_len += para_len;
+    }
+    if !buf.is_empty() {
+        out.push(buf);
+    }
+    // Merge a tiny trailing chunk into its predecessor: a 300-char tail
+    // would otherwise pay the same ~20 s prefill as a full chunk. The
+    // overshoot is bounded (≤ max + max/4 runes).
+    if out.len() >= 2 {
+        let last_len = out.last().map(|c| c.chars().count()).unwrap_or(0);
+        if last_len < max / 4 {
+            let tail = out.pop().unwrap_or_default();
+            if let Some(prev) = out.last_mut() {
+                if prev.chars().count() + last_len <= max + max / 4 {
+                    prev.push_str(&tail);
+                } else {
+                    out.push(tail);
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -595,8 +672,69 @@ mod tests {
     fn chunking_covers_the_protected_text() {
         let text = "line one\n".repeat(500);
         let (protected, _) = protect_code(&text);
-        let parts = chunk(&protected, CHUNK_MAX);
-        assert!(parts.iter().all(|p| p.chars().count() <= CHUNK_MAX));
+        let parts = chunk_paragraphs(&protected, CHUNK_MAX);
+        // A small trailing chunk may be merged into its predecessor, so the
+        // bound is `max` plus the 25% merge allowance.
+        let bound = CHUNK_MAX + CHUNK_MAX / 4;
+        assert!(parts.iter().all(|p| p.chars().count() <= bound));
         assert_eq!(parts.concat(), protected);
+    }
+
+    /// Long-message timing harness (opt-in, like `local_model_end_to_end`):
+    /// prints chunk count and total wall time for a ~8000-char reply.
+    #[test]
+    #[ignore]
+    fn local_model_long_message() {
+        let Ok(path) = std::env::var("YITERM_HYMT_MODEL") else {
+            eprintln!("YITERM_HYMT_MODEL not set; skipping");
+            return;
+        };
+        let mut translator = LocalTranslator::load(Path::new(&path)).expect("load model");
+        let para = "I've updated the authentication middleware to use the new token format. \
+            The changes are in src/auth/middleware.rs and the related tests pass. Note that \
+            existing sessions will need to be invalidated, so users will be prompted to log \
+            in again after deployment.";
+        let input = vec![para; 30].join("\n\n");
+        let t0 = Instant::now();
+        let mut streamed = String::new();
+        let mut emit = |s: &str| streamed.push_str(s);
+        let out =
+            translate_blocking(&mut translator, "Chinese", &input, &mut emit).expect("translate");
+        eprintln!(
+            "{} chars -> {} chars, {} chunks worth, {:?} total",
+            input.chars().count(),
+            out.chars().count(),
+            chunk_paragraphs(&input, CHUNK_MAX).len(),
+            t0.elapsed()
+        );
+        assert!(!out.contains("@@C"));
+    }
+
+    #[test]
+    fn tiny_trailing_chunk_merges_into_previous() {
+        let text = format!("{}\n\n{}", "a".repeat(3900), "b".repeat(300));
+        let parts = chunk_paragraphs(&text, 4000);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts.concat(), text);
+
+        // A substantial tail stays a chunk of its own.
+        let text = format!("{}\n\n{}", "a".repeat(3900), "b".repeat(1500));
+        let parts = chunk_paragraphs(&text, 4000);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts.concat(), text);
+    }
+
+    #[test]
+    fn chunking_prefers_paragraph_boundaries() {
+        let text = format!(
+            "{}\n\n{}\n\n{}",
+            "a".repeat(3000),
+            "b".repeat(3000),
+            "c".repeat(100)
+        );
+        let parts = chunk_paragraphs(&text, 4000);
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].ends_with("\n\n"));
+        assert_eq!(parts.concat(), text);
     }
 }
