@@ -38,6 +38,8 @@ Claude Code is a great coding agent, but it works in English and its conversatio
   - Chinese prompt → translated to English → written into the real `claude` PTY
   - English reply → mirrored from the JSONL transcript → translated back to Chinese as it arrives
   - English input is sent as-is (no translation call); English prompts also cost fewer Claude tokens than Chinese for the same content
+- **Attachments** — paste screenshots or attach images and files from disk;
+  images are sent to Claude as images, other files are referenced by path
 - **Streaming translation** zh → en and en → zh
   - Google's free endpoints out of the box; built-in presets for SiliconFlow
     and OpenRouter (endpoint and model pre-filled — just paste an API key);

@@ -65,6 +65,12 @@ export interface Msg {
    * still say "（图片）" instead of looking like an empty prompt.
    */
   hadImages?: boolean;
+  /**
+   * Absolute paths of non-image files attached to this turn. Unlike images
+   * they are not copied: the outgoing prompt appends the paths and Claude
+   * reads the files by path.
+   */
+  files?: string[];
 }
 
 interface ChatStore {
@@ -78,8 +84,8 @@ interface ChatStore {
   takePrompt: (convId: string) => string | null;
   /** Loads persisted history once per conversation (no-op if already in memory). */
   hydrate: (convId: string) => Promise<void>;
-  addOptimistic: (convId: string, text: string, images?: string[]) => string;
-  addPlain: (convId: string, text: string, images?: string[]) => void;
+  addOptimistic: (convId: string, text: string, images?: string[], files?: string[]) => string;
+  addPlain: (convId: string, text: string, images?: string[], files?: string[]) => string;
   markSent: (convId: string, key: string, sentText: string) => void;
   upsertFromSession: (convId: string, msgs: ChatMsg[], translate?: boolean) => void;
   appendDelta: (convId: string, key: string, delta: string) => void;
@@ -222,7 +228,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  addOptimistic: (convId, text, images) => {
+  addOptimistic: (convId, text, images, files) => {
     const key = `local-${crypto.randomUUID()}`;
     const msg: Msg = {
       key, role: 'user', original: text, translation: null,
@@ -233,27 +239,34 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       thinking: null, toolCalls: [],
       images: images?.length ? images : undefined,
       hadImages: images?.length ? true : undefined,
+      files: files?.length ? files : undefined,
     };
     set((s) => ({ byConv: { ...s.byConv, [convId]: [...(s.byConv[convId] ?? []), msg] } }));
-    if (images?.length) saveNow(convId);
-    void debugLog(`addOptimistic conv=${convId} key=${key} len=${text.length} img=${images?.length ?? 0}`);
+    if (images?.length || files?.length) saveNow(convId);
+    void debugLog(
+      `addOptimistic conv=${convId} key=${key} len=${text.length} ` +
+        `img=${images?.length ?? 0} file=${files?.length ?? 0}`,
+    );
     return key;
   },
 
   markSent: (convId, key, sentText) =>
     set((s) => ({ byConv: updateMsg(s.byConv, convId, key, (m) => ({ ...m, sentText })) })),
 
-  addPlain: (convId, text, images) => {
+  addPlain: (convId, text, images, files) => {
+    const key = `local-${crypto.randomUUID()}`;
     const msg: Msg = {
-      key: `local-${crypto.randomUUID()}`, role: 'user', original: text, translation: null,
+      key, role: 'user', original: text, translation: null,
       working: false, error: null,
       ts: images?.length ? new Date().toISOString() : null,
       thinking: null, toolCalls: [],
       images: images?.length ? images : undefined,
       hadImages: images?.length ? true : undefined,
+      files: files?.length ? files : undefined,
     };
     set((s) => ({ byConv: { ...s.byConv, [convId]: [...(s.byConv[convId] ?? []), msg] } }));
-    if (images?.length) saveNow(convId);
+    if (images?.length || files?.length) saveNow(convId);
+    return key;
   },
 
   upsertFromSession: (convId, msgs, translate = true) => {

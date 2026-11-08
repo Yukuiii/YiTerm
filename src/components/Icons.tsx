@@ -146,6 +146,19 @@ export const ArrowDownIcon = ({ size = 16 }: { size?: number }) => (
   </Icon>
 );
 
+export const PaperclipIcon = ({ size = 16 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M21 12.5 12.5 21a5 5 0 0 1-7-7l8-8a3.5 3.5 0 0 1 5 5l-8 8a2 2 0 0 1-2.8-2.8l7.3-7.3" />
+  </Icon>
+);
+
+export const FileIcon = ({ size = 16 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+    <path d="M14 3v5h5" />
+  </Icon>
+);
+
 export const XIcon = ({ size = 16 }: { size?: number }) => (
   <Icon size={size}>
     <path d="m6 6 12 12M18 6 6 18" />

@@ -3,7 +3,9 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import type { Msg } from '../stores/chat';
 import { oneLine } from '../format';
 import Markdown from './Markdown';
-import { ChevronIcon, CodeIcon, SparkleIcon, TerminalIcon } from './Icons';
+import { ChevronIcon, CodeIcon, FileIcon, SparkleIcon, TerminalIcon } from './Icons';
+
+const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
 
 /**
  * Thumbnails for pasted screenshots. They live in the app cache, which the OS
@@ -103,6 +105,17 @@ export default function MessageBubble({
         )}
 
         {msg.images && msg.images.length > 0 && <BubbleImages paths={msg.images} />}
+
+        {msg.files && msg.files.length > 0 && (
+          <div className="bubble-files">
+            {msg.files.map((path) => (
+              <span className="bubble-file" key={path} title={path}>
+                <FileIcon size={12} />
+                <span className="bubble-file-name">{baseName(path)}</span>
+              </span>
+            ))}
+          </div>
+        )}
 
         <div className="bubble-text">
           {primary.trim() ? (isUser ? primary : <Markdown>{primary}</Markdown>) : emptyBody}

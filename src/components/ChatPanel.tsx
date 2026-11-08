@@ -1,21 +1,41 @@
 import { useEffect, useRef, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { revealItemInDir } from '@tauri-apps/plugin-opener';
-import { chatImageSave, encodeBytesToBase64, hasCJK, terminalSendPrompt } from '../ipc';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import {
+  chatAttachmentImport,
+  chatImageSave,
+  encodeBytesToBase64,
+  hasCJK,
+  terminalSendPrompt,
+} from '../ipc';
 import { useChatStore } from '../stores/chat';
-import { useConversationsStore } from '../stores/conversations';
 import { useTerminalsStore } from '../stores/terminals';
 import MessageBubble from './MessageBubble';
-import { ArrowDownIcon, ArrowUpIcon, FolderIcon, XIcon } from './Icons';
+import { ArrowDownIcon, ArrowUpIcon, FileIcon, PaperclipIcon, XIcon } from './Icons';
 
 interface PendingImage {
   id: string;
   path: string;
 }
 
+interface PendingFile {
+  id: string;
+  path: string;
+  name: string;
+}
+
+/**
+ * Appends file references to the already-translated prompt. Paths are not
+ * translated; Claude reads the files by path. Kept out of the bubble text.
+ */
+function withFiles(text: string, files: string[]): string {
+  if (files.length === 0) return text;
+  const refs = ['Attached files:', ...files.map((p) => `\`${p}\``)].join('\n');
+  return text.trim() ? `${text.trimEnd()}\n\n${refs}` : refs;
+}
+
 export default function ChatPanel({ convId }: { convId: string }) {
   const msgs = useChatStore((s) => s.byConv[convId]) ?? [];
-  const conv = useConversationsStore((s) => s.list.find((c) => c.id === convId));
   const terminal = useTerminalsStore((s) => s.byConv[convId]);
   const exited = useTerminalsStore((s) => (convId in s.exited ? s.exited[convId] : undefined));
   const pending = useChatStore((s) => s.pendingPrompts[convId]);
@@ -23,7 +43,8 @@ export default function ChatPanel({ convId }: { convId: string }) {
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [images, setImages] = useState<PendingImage[]>([]);
-  const [savingImages, setSavingImages] = useState(0);
+  const [files, setFiles] = useState<PendingFile[]>([]);
+  const [attaching, setAttaching] = useState(0);
   const messagesRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // Whether the list is parked at the newest message. While it isn't (the
@@ -82,9 +103,9 @@ export default function ChatPanel({ convId }: { convId: string }) {
   }, [convId]);
 
   /** Persists clipboard images and adds a removable chip for each. */
-  const addPastedImages = async (files: File[]) => {
-    setSavingImages((n) => n + files.length);
-    for (const file of files) {
+  const addPastedImages = async (picked: File[]) => {
+    setAttaching((n) => n + picked.length);
+    for (const file of picked) {
       try {
         const bytes = new Uint8Array(await file.arrayBuffer());
         const path = await chatImageSave(convId, file.type, encodeBytesToBase64(bytes));
@@ -92,7 +113,39 @@ export default function ChatPanel({ convId }: { convId: string }) {
       } catch (e) {
         flashNotice(`图片添加失败：${String(e)}`);
       } finally {
-        setSavingImages((n) => n - 1);
+        setAttaching((n) => n - 1);
+      }
+    }
+  };
+
+  /** Files chosen from disk: images join the screenshot flow, other files are
+   *  referenced by path and read by Claude. */
+  const pickAttachments = async () => {
+    let picked: string | string[] | null = null;
+    try {
+      picked = await openDialog({ multiple: true, title: '选择附件' });
+    } catch (e) {
+      flashNotice(`选择附件失败：${String(e)}`);
+      return;
+    }
+    const paths = picked === null ? [] : Array.isArray(picked) ? picked : [picked];
+    if (paths.length === 0) return;
+    setAttaching((n) => n + paths.length);
+    for (const path of paths) {
+      try {
+        const att = await chatAttachmentImport(convId, path);
+        if (att.kind === 'image') {
+          setImages((prev) => [...prev, { id: crypto.randomUUID(), path: att.path }]);
+        } else {
+          setFiles((prev) => [
+            ...prev,
+            { id: crypto.randomUUID(), path: att.path, name: att.name },
+          ]);
+        }
+      } catch (e) {
+        flashNotice(`附件添加失败：${String(e)}`);
+      } finally {
+        setAttaching((n) => n - 1);
       }
     }
   };
@@ -119,10 +172,11 @@ export default function ChatPanel({ convId }: { convId: string }) {
 
   const send = async (override?: string) => {
     const text = (override ?? input).trim();
-    // Only the composer's own images belong to this turn; `override` comes from
-    // the landing-screen prompt queue, which is text-only.
+    // Only the composer's own attachments belong to this turn; `override`
+    // comes from the landing-screen prompt queue, which is text-only.
     const paths = override === undefined ? images.map((i) => i.path) : [];
-    if ((!text && paths.length === 0) || sending || savingImages > 0) return;
+    const filePaths = override === undefined ? files.map((f) => f.path) : [];
+    if ((!text && paths.length === 0 && filePaths.length === 0) || sending || attaching > 0) return;
     const termId = terminal?.terminalId;
     if (exited !== undefined) {
       flashNotice('终端已退出，无法发送');
@@ -137,6 +191,7 @@ export default function ChatPanel({ convId }: { convId: string }) {
     if (override === undefined) {
       setInput('');
       setImages([]);
+      setFiles([]);
     }
     // A sent turn always brings the view to the newest message.
     scrollToBottom();
@@ -144,15 +199,19 @@ export default function ChatPanel({ convId }: { convId: string }) {
     const store = useChatStore.getState();
     try {
       if (hasCJK(text)) {
-        const key = store.addOptimistic(convId, text, paths);
+        const key = store.addOptimistic(convId, text, paths, filePaths);
         const en = await store.translateOutbound(convId, key, text);
+        const sent = withFiles(en, filePaths);
         // Record before writing: the JSONL line can land within milliseconds
         // of the write and reconcile relies on this text.
-        useChatStore.getState().markSent(convId, key, en);
-        await terminalSendPrompt(termId, en, paths);
+        useChatStore.getState().markSent(convId, key, sent);
+        await terminalSendPrompt(termId, sent, paths);
       } else {
-        store.addPlain(convId, text, paths);
-        await terminalSendPrompt(termId, text, paths);
+        const sent = withFiles(text, filePaths);
+        const key = store.addPlain(convId, text, paths, filePaths);
+        // The bubble shows the typed text; reconcile against what Claude saw.
+        if (filePaths.length) store.markSent(convId, key, sent);
+        await terminalSendPrompt(termId, sent, paths);
       }
     } catch (e) {
       // 翻译失败：原文已在气泡中，给出发送选项
@@ -180,8 +239,8 @@ export default function ChatPanel({ convId }: { convId: string }) {
     if (termId === undefined) return;
     const m = (useChatStore.getState().byConv[convId] ?? []).find((x) => x.key === key);
     useChatStore.getState().setWorking(convId, key, false);
-    // A failed translation must not silently drop the screenshots.
-    await terminalSendPrompt(termId, original, m?.images ?? []);
+    // A failed translation must not silently drop the attachments.
+    await terminalSendPrompt(termId, withFiles(original, m?.files ?? []), m?.images ?? []);
   };
 
   const retryTranslate = async (key: string) => {
@@ -191,7 +250,9 @@ export default function ChatPanel({ convId }: { convId: string }) {
     try {
       const en = await useChatStore.getState().translateOutbound(convId, key, m.original);
       const termId = terminal?.terminalId;
-      if (termId !== undefined) await terminalSendPrompt(termId, en, m.images ?? []);
+      if (termId !== undefined) {
+        await terminalSendPrompt(termId, withFiles(en, m.files ?? []), m.images ?? []);
+      }
     } catch (e) {
       useChatStore.getState().setError(convId, key, String(e));
     }
@@ -229,7 +290,7 @@ export default function ChatPanel({ convId }: { convId: string }) {
             <ArrowDownIcon size={15} />
           </button>
         )}
-        {images.length > 0 && (
+        {(images.length > 0 || files.length > 0) && (
           <div className="composer-attachments">
             {images.map((img) => (
               <div className="attachment-chip" key={img.id}>
@@ -243,17 +304,28 @@ export default function ChatPanel({ convId }: { convId: string }) {
                 </button>
               </div>
             ))}
+            {files.map((f) => (
+              <div className="attachment-file" key={f.id} title={f.path}>
+                <FileIcon size={14} />
+                <span className="attachment-name">{f.name}</span>
+                <button
+                  className="attachment-remove"
+                  title="移除附件"
+                  onClick={() => setFiles((prev) => prev.filter((x) => x.id !== f.id))}
+                >
+                  <XIcon size={11} />
+                </button>
+              </div>
+            ))}
           </div>
         )}
         <div className="composer">
           <button
             className="composer-icon-btn"
-            title="在访达中显示项目文件夹"
-            onClick={() => {
-              if (conv) void revealItemInDir(conv.folder).catch(() => {});
-            }}
+            title="添加附件（图片或文件）"
+            onClick={() => void pickAttachments()}
           >
-            <FolderIcon size={17} />
+            <PaperclipIcon size={17} />
           </button>
           <textarea
             ref={inputRef}
@@ -274,7 +346,7 @@ export default function ChatPanel({ convId }: { convId: string }) {
             className="send-btn"
             title="发送"
             onClick={() => void send()}
-            disabled={sending || savingImages > 0 || (!input.trim() && images.length === 0)}
+            disabled={sending || attaching > 0 || (!input.trim() && images.length === 0 && files.length === 0)}
           >
             <ArrowUpIcon size={16} />
           </button>

@@ -495,6 +495,80 @@ pub fn chat_image_save(
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// Result of attaching a file chosen from disk.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedAttachment {
+    /// "image" — copied into the conversation cache and pasted into the PTY
+    /// like a screenshot; "file" — referenced by its original path.
+    pub kind: String,
+    pub path: String,
+    pub name: String,
+}
+
+/// Attaches a file picked in the system dialog. Real images go through the
+/// same cache + paste path as clipboard screenshots; everything else keeps its
+/// original path, which the composer appends to the prompt so Claude can read
+/// it (no copy, no translation of the path).
+#[tauri::command]
+pub fn chat_attachment_import(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    conv_id: String,
+    path: String,
+) -> Result<ImportedAttachment, String> {
+    use std::io::Read;
+
+    if !valid_conv_id(&conv_id) {
+        return Err("invalid conversation id".into());
+    }
+    let src = std::path::PathBuf::from(&path);
+    let meta = std::fs::metadata(&src).map_err(|e| format!("读取附件失败: {e}"))?;
+    if !meta.is_file() {
+        return Err("只能选择文件".into());
+    }
+    let name = src
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.clone());
+
+    // Read the magic bytes (a single `read` may return fewer than requested).
+    let mut head = [0u8; 12];
+    let mut filled = 0;
+    let mut file =
+        std::fs::File::open(&src).map_err(|e| format!("读取附件失败: {e}"))?;
+    while filled < head.len() {
+        match file.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) => return Err(format!("读取附件失败: {e}")),
+        }
+    }
+    if let Some(mime) = sniff_image_mime(&head[..filled]) {
+        if meta.len() > MAX_IMAGE_BYTES as u64 {
+            return Err(format!(
+                "图片过大（上限 {} MB）",
+                MAX_IMAGE_BYTES / (1024 * 1024)
+            ));
+        }
+        let ext = image_extension(mime).expect("sniffed type is always supported");
+        let dir = images_dir(&state, &app, &conv_id);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let dest = dir.join(format!("{}.{ext}", uuid::Uuid::new_v4()));
+        std::fs::copy(&src, &dest).map_err(|e| format!("复制图片失败: {e}"))?;
+        return Ok(ImportedAttachment {
+            kind: "image".into(),
+            path: dest.to_string_lossy().into_owned(),
+            name,
+        });
+    }
+    Ok(ImportedAttachment {
+        kind: "file".into(),
+        path,
+        name,
+    })
+}
+
 fn now_iso() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

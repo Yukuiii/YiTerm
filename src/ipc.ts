@@ -140,6 +140,16 @@ export const chatLoad = (convId: string) =>
 export const chatImageSave = (convId: string, mime: string, data: string) =>
   invoke<string>('chat_image_save', { convId, mime, data });
 
+export interface ImportedAttachment {
+  kind: 'image' | 'file';
+  path: string;
+  name: string;
+}
+
+/** Copies an image into the cache or returns the file's original path. */
+export const chatAttachmentImport = (convId: string, path: string) =>
+  invoke<ImportedAttachment>('chat_attachment_import', { convId, path });
+
 // ---------- settings ----------
 
 export const settingsGet = () => invoke<Settings>('settings_get');

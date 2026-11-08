@@ -550,6 +550,30 @@ button, input, textarea { font-family: inherit; }
   border-radius: 8px;
 }
 
+.bubble-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.bubble-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 260px;
+  padding: 2px 8px;
+  color: var(--fg-muted);
+  font-size: 11.5px;
+  background: #1b1b1b;
+  border: 1px solid #333333;
+  border-radius: 7px;
+}
+.bubble-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .bubble-text { white-space: pre-wrap; }
 .bubble-text .md { white-space: normal; }
 .bubble-placeholder { color: var(--fg-faint); font-style: italic; }
@@ -821,6 +845,32 @@ button, input, textarea { font-family: inherit; }
   cursor: pointer;
 }
 .attachment-remove:hover { background: rgba(0, 0, 0, 0.88); color: #ffffff; }
+
+/* Non-image attachments: a compact file chip beside the image thumbnails. */
+.attachment-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  height: 30px;
+  padding: 0 4px 0 9px;
+  color: #cfcfcf;
+  font-size: 12px;
+  background: #1b1b1b;
+  border: 1px solid #333333;
+  border-radius: 8px;
+}
+.attachment-file .attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-file .attachment-remove {
+  position: static;
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
 
 .composer {
   display: flex;
