@@ -64,6 +64,16 @@ fn target_lang(direction: Direction) -> &'static str {
     }
 }
 
+/// Pin the source language: short mixed text such as
+/// "conversations.json 的作用？" is otherwise detected as English and
+/// returned unchanged.
+fn source_lang(direction: Direction) -> &'static str {
+    match direction {
+        Direction::ZhToEn => "zh",
+        Direction::EnToZh => "en",
+    }
+}
+
 struct VersionCache {
     version: Option<String>,
     fetched_at: Option<Instant>,
@@ -198,6 +208,7 @@ async fn request(
 ) -> Result<String, String> {
     let body = json!({
         "text": [text],
+        "source_lang": source_lang(direction),
         "target_lang": target_lang(direction),
         "usage_type": "translate",
         "app_information": {
@@ -312,6 +323,8 @@ mod tests {
 
     #[test]
     fn language_mapping_uses_localized_codes() {
+        assert_eq!(source_lang(Direction::ZhToEn), "zh");
+        assert_eq!(source_lang(Direction::EnToZh), "en");
         assert_eq!(target_lang(Direction::ZhToEn), "en-US");
         assert_eq!(target_lang(Direction::EnToZh), "zh-Hans");
     }
@@ -346,13 +359,18 @@ mod tests {
     async fn live_oneshot_roundtrip() {
         let http = reqwest::Client::new();
         let version = app_version(&http).await;
-        let out = request(&http, Direction::ZhToEn, &version, "你好，世界！")
-            .await
-            .expect("oneshot request");
+        // Mixed Chinese/English must still translate; without a source hint
+        // DeepL can detect this as English and echo it unchanged.
+        let out = request(
+            &http,
+            Direction::ZhToEn,
+            &version,
+            "conversations.json 的作用？",
+        )
+        .await
+        .expect("oneshot request");
         eprintln!("DeepL iOS {version} → {out}");
-        assert!(
-            out.to_ascii_lowercase().contains("hello"),
-            "unexpected: {out}"
-        );
+        assert!(out.to_ascii_lowercase().contains("conversations.json"));
+        assert!(!out.contains('的'), "source text was echoed: {out}");
     }
 }

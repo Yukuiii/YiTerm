@@ -76,6 +76,16 @@ fn target_lang(direction: Direction) -> &'static str {
     }
 }
 
+/// Pin the source language instead of letting DeepL auto-detect: short mixed
+/// text such as "conversations.json 的作用？" can be detected as English and
+/// returned unchanged.
+fn source_lang(direction: Direction) -> &'static str {
+    match direction {
+        Direction::ZhToEn => "ZH",
+        Direction::EnToZh => "EN",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn translate(
     http: &reqwest::Client,
@@ -119,11 +129,13 @@ pub async fn translate(
         let body = if protocol == Protocol::DeepL {
             json!({
                 "text": [part],
+                "source_lang": source_lang(direction),
                 "target_lang": target_lang(direction),
             })
         } else {
             json!({
                 "text": part,
+                "source_lang": source_lang(direction),
                 "target_lang": target_lang(direction),
             })
         };
@@ -232,6 +244,8 @@ mod tests {
 
     #[test]
     fn language_mapping() {
+        assert_eq!(source_lang(Direction::ZhToEn), "ZH");
+        assert_eq!(source_lang(Direction::EnToZh), "EN");
         assert_eq!(target_lang(Direction::ZhToEn), "EN");
         assert_eq!(target_lang(Direction::EnToZh), "ZH");
     }
