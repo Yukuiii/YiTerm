@@ -440,6 +440,7 @@ pub fn safe_stream_prefix(s: &str) -> usize {
 pub async fn run(
     http: &reqwest::Client,
     settings: &TranslationSettings,
+    api_key: Option<&str>,
     direction: Direction,
     text: &str,
     request_id: &str,
@@ -459,7 +460,7 @@ pub async fn run(
 
     let result = match settings.mode.as_str() {
         "chat" => {
-            let api_key = crate::settings::api_key_get(&settings.chat_provider).unwrap_or_default();
+            let api_key = api_key.unwrap_or_default();
             let base = settings
                 .chat_base_url
                 .clone()

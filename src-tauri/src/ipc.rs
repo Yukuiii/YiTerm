@@ -712,13 +712,22 @@ pub fn settings_set(
 }
 
 #[tauri::command]
-pub fn api_key_get(provider: String) -> Option<String> {
-    crate::settings::api_key_get(&provider)
+pub fn api_key_get(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    provider: String,
+) -> Option<String> {
+    crate::settings::api_key_get(&state.config_dir(&app), &provider)
 }
 
 #[tauri::command]
-pub fn api_key_set(provider: String, key: Option<String>) -> Result<(), String> {
-    crate::settings::api_key_set(&provider, key)
+pub fn api_key_set(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    provider: String,
+    key: Option<String>,
+) -> Result<(), String> {
+    crate::settings::api_key_set(&state.config_dir(&app), &provider, key)
 }
 
 // ---------- translate ----------
@@ -745,7 +754,24 @@ pub async fn translate(
         .await;
     }
     let http = state.http.clone();
-    translate::run(&http, &settings.translation, direction, &text, &request_id, &channel).await
+    let api_key = if settings.translation.mode == "chat" {
+        crate::settings::api_key_get(
+            &state.config_dir(&app),
+            &settings.translation.chat_provider,
+        )
+    } else {
+        None
+    };
+    translate::run(
+        &http,
+        &settings.translation,
+        api_key.as_deref(),
+        direction,
+        &text,
+        &request_id,
+        &channel,
+    )
+    .await
 }
 
 // ---------- local model management ----------

@@ -1,9 +1,9 @@
-use std::path::Path;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
-
-const KEYCHAIN_SERVICE: &str = "com.yiterm.app";
-const KEYCHAIN_USER: &str = "chat-api-key";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,44 +106,70 @@ fn which_claude() -> Option<String> {
     None
 }
 
-// ---------- API key (macOS Keychain) ----------
+// ---------- API keys (local file) ----------
+//
+// The app is unsigned and rebuilt often; talking to the macOS Keychain
+// prompts or fails whenever the binary changes. Keys therefore live in a
+// small JSON file next to settings.json, readable only by the user (0600).
 
-/// One key per chat provider: preset keys must not overwrite each other.
-/// `custom` keeps the original account name so existing keys continue to work.
-fn keychain_user(provider: &str) -> String {
-    let provider = provider.trim();
-    if provider.is_empty() || provider == "custom" {
-        KEYCHAIN_USER.to_string()
-    } else {
-        format!("{KEYCHAIN_USER}:{provider}")
-    }
+fn keys_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("keys.json")
 }
 
-pub fn api_key_get(provider: &str) -> Option<String> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &keychain_user(provider)).ok()?;
-    match entry.get_password() {
-        Ok(k) => Some(k),
-        Err(keyring::Error::NoEntry) => None,
+fn read_keys(config_dir: &Path) -> HashMap<String, String> {
+    let path = keys_path(config_dir);
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!(?path, error = %e, "corrupt keys.json, starting empty");
+            HashMap::new()
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
         Err(e) => {
-            tracing::warn!(error = %e, "keychain read failed");
-            None
+            tracing::warn!(?path, error = %e, "keys.json read failed");
+            HashMap::new()
         }
     }
 }
 
-pub fn api_key_set(provider: &str, key: Option<String>) -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &keychain_user(provider))
-        .map_err(|e| e.to_string())?;
-    match key {
-        Some(k) if !k.trim().is_empty() => entry
-            .set_password(k.trim())
-            .map_err(|e| e.to_string()),
-        _ => match entry.delete_credential() {
-            Ok(()) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(e.to_string()),
-        },
+fn write_keys(config_dir: &Path, keys: &HashMap<String, String>) -> Result<(), String> {
+    std::fs::create_dir_all(config_dir).map_err(|e| e.to_string())?;
+    let path = keys_path(config_dir);
+    let tmp = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(keys).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
     }
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+/// One key per chat provider: preset keys must not overwrite each other.
+pub fn api_key_get(config_dir: &Path, provider: &str) -> Option<String> {
+    read_keys(config_dir)
+        .get(provider.trim())
+        .cloned()
+        .filter(|k| !k.trim().is_empty())
+}
+
+pub fn api_key_set(
+    config_dir: &Path,
+    provider: &str,
+    key: Option<String>,
+) -> Result<(), String> {
+    let mut keys = read_keys(config_dir);
+    let provider = provider.trim();
+    match key {
+        Some(k) if !k.trim().is_empty() => {
+            keys.insert(provider.to_string(), k.trim().to_string());
+        }
+        _ => {
+            keys.remove(provider);
+        }
+    }
+    write_keys(config_dir, &keys)
 }
 
 #[cfg(test)]
@@ -159,6 +185,31 @@ mod tests {
         .unwrap();
         assert_eq!(s.translation.chat_provider, "custom");
         assert_eq!(s.translation.mode, "chat");
+    }
+
+    #[test]
+    fn api_keys_live_in_a_file_and_are_per_provider() {
+        let dir = std::env::temp_dir().join(format!("yiterm-keys-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(api_key_get(&dir, "custom"), None);
+        api_key_set(&dir, "siliconflow", Some(" sk-sf ".into())).unwrap();
+        api_key_set(&dir, "openrouter", Some("sk-or".into())).unwrap();
+        assert_eq!(api_key_get(&dir, "siliconflow").as_deref(), Some("sk-sf"));
+        assert_eq!(api_key_get(&dir, "openrouter").as_deref(), Some("sk-or"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join("keys.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "keys.json must be user-only");
+        }
+        api_key_set(&dir, "siliconflow", None).unwrap();
+        assert_eq!(api_key_get(&dir, "siliconflow"), None);
+        assert_eq!(api_key_get(&dir, "openrouter").as_deref(), Some("sk-or"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

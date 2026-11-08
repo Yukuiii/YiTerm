@@ -60,7 +60,7 @@ Claude Code is a great coding agent, but it works in English and its conversatio
   replayed history is shown as-is, while new replies are still translated
 - **Two layouts**: Code (chat + terminal) and Cowork (chat only)
 - **Persistence**: conversations, chat history, and translation settings
-- **API keys in the macOS Keychain** (one per chat provider)
+- **API keys in a local `keys.json`** (one per chat provider)
 - **System proxy detection** via `scutil`, so translation works behind a local proxy
 - **Plain-text logs** in `~/Library/Logs/com.yiterm.app/`
 
@@ -74,7 +74,7 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 ┌───────────────────────────────▼───────────────────────────────────┐
 │                           Rust backend                            │
 │  PTY (portable-pty) · JSONL follower · translate (Google/Chat/Local)│
-│  settings + Keychain · conversation and chat persistence          │
+│  settings + API keys · conversation and chat persistence          │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -123,9 +123,10 @@ YiTerm auto-detects `claude` in `~/.local/bin` or on `PATH`. You can point it at
   directory (`~/Library/Application Support/com.yiterm.app` on macOS,
   `%LOCALAPPDATA%\com.yiterm.app` on Windows) and is downloaded from Settings.
 - **Target language** — replies are translated to Simplified Chinese (`zh-CN`).
-- **API keys** — stored in the macOS Keychain (separate key per chat provider), never in the repository.
+- **API keys** — stored in `keys.json` in the app data directory (mode 0600 on Unix), one per chat provider; never in the repository.
 - **App data** — `~/Library/Application Support/com.yiterm.app/`
   - `settings.json`
+  - `keys.json` (chat provider API keys, mode 0600)
   - `conversations.json`
   - `chats/<conversation-id>.json`
 - **Pasted screenshots** — `~/Library/Caches/com.yiterm.app/images/<conversation-id>/`

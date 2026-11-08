@@ -258,7 +258,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
               </label>
               <label>
                 API Key{providerPreset ? `（${providerPreset.label}）` : ''}{' '}
-                {hasKey && <span className="key-badge">已存于钥匙串</span>}
+                {hasKey && <span className="key-badge">已保存</span>}
                 <input
                   type="password"
                   placeholder={hasKey ? '（已保存，输入可覆盖）' : 'sk-…'}
