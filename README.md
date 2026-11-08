@@ -31,7 +31,9 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 ## Features
 
 - **Streaming translation** zh → en and en → zh
-  - Google's free endpoints out of the box, or any OpenAI-compatible chat API
+  - Google's free endpoints out of the box; built-in presets for SiliconFlow
+    and OpenRouter (endpoint and model pre-filled — just paste an API key);
+    or any OpenAI-compatible chat API
   - **Fully offline local mode**: Tencent's Hy-MT2-1.8B runs on CPU inside the
     app (no Ollama, no API key). The Q3_K_M model (~907 MB) is downloaded on
     demand from Settings — nothing downloads automatically at launch.

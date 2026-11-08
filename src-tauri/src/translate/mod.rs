@@ -376,7 +376,7 @@ pub async fn run(
 
     let result = match settings.mode.as_str() {
         "chat" => {
-            let api_key = crate::settings::api_key_get().unwrap_or_default();
+            let api_key = crate::settings::api_key_get(&settings.chat_provider).unwrap_or_default();
             let base = settings
                 .chat_base_url
                 .clone()

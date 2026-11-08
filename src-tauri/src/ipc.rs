@@ -523,13 +523,13 @@ pub fn settings_set(
 }
 
 #[tauri::command]
-pub fn api_key_get() -> Option<String> {
-    crate::settings::api_key_get()
+pub fn api_key_get(provider: String) -> Option<String> {
+    crate::settings::api_key_get(&provider)
 }
 
 #[tauri::command]
-pub fn api_key_set(key: Option<String>) -> Result<(), String> {
-    crate::settings::api_key_set(key)
+pub fn api_key_set(provider: String, key: Option<String>) -> Result<(), String> {
+    crate::settings::api_key_set(&provider, key)
 }
 
 // ---------- translate ----------
