@@ -22,6 +22,10 @@ const IMAGE_ATTACH_TIMEOUT: Duration = Duration::from_secs(8);
 /// rendered before Claude clears its paste-in-progress flag, so Enter must not
 /// follow too closely or it is swallowed.
 const IMAGE_ATTACH_SETTLE: Duration = Duration::from_millis(400);
+/// Text arrives as one burst, which Claude Code handles like a paste; an
+/// Enter in the same burst is swallowed. Give the TUI a beat, then press
+/// Enter on its own.
+const ENTER_SETTLE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -175,11 +179,11 @@ impl TerminalHandle {
     /// asynchronously, and while that is in flight it swallows Enter and never
     /// re-issues it — a `\r` written in the same burst as the image paste leaves
     /// the prompt sitting unsent in its input box. So: paste the paths, wait for
-    /// the `[Image #N]` marker to come back on the PTY, then write text + `\r`
-    /// together exactly as a text-only turn does.
+    /// the `[Image #N]` marker to come back on the PTY, then type the text and
+    /// press Enter through `submit_text`.
     pub async fn send_prompt(&self, text: &str, image_paths: &[String]) -> Result<(), String> {
         if image_paths.is_empty() {
-            return self.write(text, true);
+            return self.submit_text(text).await;
         }
         let baseline = self.backlog.lock().map_err(|e| e.to_string())?.written();
         self.paste(&image_paths.join("\n"))?;
@@ -188,7 +192,18 @@ impl TerminalHandle {
             // read the file itself. Stranding the turn would be worse.
             tracing::warn!(target: "yiterm", "image attach marker not seen; submitting anyway");
         }
-        self.write(text, true)
+        self.submit_text(text).await
+    }
+
+    /// Types `text`, then presses Enter. A text burst is processed like a
+    /// paste by Claude Code (especially when it is long or multi-line), and
+    /// an Enter in the same burst is swallowed — the prompt then just sits in
+    /// the input box. Write the text first, let the TUI settle, and press
+    /// Enter separately.
+    async fn submit_text(&self, text: &str) -> Result<(), String> {
+        self.write(text, false)?;
+        tokio::time::sleep(ENTER_SETTLE).await;
+        self.write("", true)
     }
 
     /// Polls the backlog for the attachment marker rendered after a paste.

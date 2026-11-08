@@ -26,12 +26,14 @@ interface PendingFile {
 
 /**
  * Appends file references to the already-translated prompt. Paths are not
- * translated; Claude reads the files by path. Kept out of the bubble text.
+ * translated; Claude reads the files by path. Kept on the same line: a
+ * newline in the burst makes Claude Code treat it as a paste and swallow
+ * the Enter that follows.
  */
 function withFiles(text: string, files: string[]): string {
   if (files.length === 0) return text;
-  const refs = ['Attached files:', ...files.map((p) => `\`${p}\``)].join('\n');
-  return text.trim() ? `${text.trimEnd()}\n\n${refs}` : refs;
+  const refs = files.map((p) => `\`${p}\``).join(' ');
+  return text.trim() ? `${text.trimEnd()} ${refs}` : refs;
 }
 
 export default function ChatPanel({ convId }: { convId: string }) {
