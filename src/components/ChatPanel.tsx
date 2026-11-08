@@ -6,7 +6,7 @@ import { useChatStore } from '../stores/chat';
 import { useConversationsStore } from '../stores/conversations';
 import { useTerminalsStore } from '../stores/terminals';
 import MessageBubble from './MessageBubble';
-import { ArrowUpIcon, FolderIcon, XIcon } from './Icons';
+import { ArrowDownIcon, ArrowUpIcon, FolderIcon, XIcon } from './Icons';
 
 interface PendingImage {
   id: string;
@@ -26,6 +26,27 @@ export default function ChatPanel({ convId }: { convId: string }) {
   const [savingImages, setSavingImages] = useState(0);
   const messagesRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Whether the list is parked at the newest message. While it isn't (the
+  // user scrolled up to read), streaming updates must not yank the view down;
+  // a floating button offers the jump instead.
+  const atBottomRef = useRef(true);
+  const [atBottom, setAtBottom] = useState(true);
+
+  const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
+    const el = messagesRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior });
+    atBottomRef.current = true;
+    setAtBottom(true);
+  };
+
+  const onMessagesScroll = () => {
+    const el = messagesRef.current;
+    if (!el) return;
+    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    atBottomRef.current = bottom;
+    setAtBottom(bottom);
+  };
 
   // One row by default; grow with content up to the CSS max-height so the
   // composer never reserves an empty second line (browser default is rows=2).
@@ -49,9 +70,16 @@ export default function ChatPanel({ convId }: { convId: string }) {
   useEffect(() => {
     // Scroll only the message list. `scrollIntoView` also scrolls the document
     // (including horizontally), which could shift the sidebar out of view.
-    const el = messagesRef.current;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    // Skip while the user is reading history further up.
+    if (atBottomRef.current) scrollToBottom('smooth');
   }, [msgs.length, lastMsg?.translation, lastMsg?.original]);
+
+  // Conversation switch: start at the newest message.
+  useEffect(() => {
+    atBottomRef.current = true;
+    scrollToBottom();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [convId]);
 
   /** Persists clipboard images and adds a removable chip for each. */
   const addPastedImages = async (files: File[]) => {
@@ -110,6 +138,8 @@ export default function ChatPanel({ convId }: { convId: string }) {
       setInput('');
       setImages([]);
     }
+    // A sent turn always brings the view to the newest message.
+    scrollToBottom();
     setSending(true);
     const store = useChatStore.getState();
     try {
@@ -169,7 +199,7 @@ export default function ChatPanel({ convId }: { convId: string }) {
 
   return (
     <div className="chat-panel">
-      <div className="messages" ref={messagesRef}>
+      <div className="messages" ref={messagesRef} onScroll={onMessagesScroll}>
         {msgs.length === 0 && (
           <div className="msg-empty">
             用中文输入需求，会自动翻译成英文发送给 Claude Code；
@@ -190,6 +220,15 @@ export default function ChatPanel({ convId }: { convId: string }) {
       {notice && <div className="composer-notice">{notice}</div>}
 
       <div className="composer-wrap">
+        {!atBottom && (
+          <button
+            className="scroll-bottom-btn"
+            title="回到最新"
+            onClick={() => scrollToBottom()}
+          >
+            <ArrowDownIcon size={15} />
+          </button>
+        )}
         {images.length > 0 && (
           <div className="composer-attachments">
             {images.map((img) => (

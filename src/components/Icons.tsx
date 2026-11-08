@@ -139,6 +139,13 @@ export const ArrowUpIcon = ({ size = 16 }: { size?: number }) => (
   </Icon>
 );
 
+export const ArrowDownIcon = ({ size = 16 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M12 5v14" />
+    <path d="m5 12 7 7 7-7" />
+  </Icon>
+);
+
 export const XIcon = ({ size = 16 }: { size?: number }) => (
   <Icon size={size}>
     <path d="m6 6 12 12M18 6 6 18" />

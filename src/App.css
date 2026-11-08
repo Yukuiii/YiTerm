@@ -753,19 +753,31 @@ button, input, textarea { font-family: inherit; }
   color: #a9a9a9;
 }
 
-.toggle-original {
-  padding: 6px 0 0;
-  background: none;
-  border: 0;
-  color: var(--fg-faint);
-  font-size: 11px;
-  cursor: pointer;
-}
-.toggle-original:hover { color: #d8d8d8; }
-
 /* ---------- composer ---------- */
 
-.composer-wrap { flex: none; padding: 8px 20px 12px; }
+.composer-wrap { flex: none; padding: 8px 20px 12px; position: relative; }
+
+/* floating "back to latest" pill, shown while the list is scrolled up */
+.scroll-bottom-btn {
+  position: absolute;
+  left: 50%;
+  top: -38px;
+  transform: translateX(-50%);
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: #242424;
+  border: 1px solid #3a3a3a;
+  border-radius: 999px;
+  color: var(--fg);
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  z-index: 5;
+}
+.scroll-bottom-btn:hover { background: #2e2e2e; border-color: #4a4a4a; }
 
 /* pasted-screenshot chips, above the input box */
 .composer-attachments {
