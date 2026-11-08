@@ -33,8 +33,8 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 - **Streaming translation** zh → en and en → zh
   - Google's free endpoints out of the box, or any OpenAI-compatible chat API
   - **Fully offline local mode**: Tencent's Hy-MT2-1.8B runs on CPU inside the
-    app (no Ollama, no API key). The Q3_K_M model (~907 MB) downloads in the
-    background on first launch.
+    app (no Ollama, no API key). The Q3_K_M model (~907 MB) is downloaded on
+    demand from Settings — nothing downloads automatically at launch.
   - Fenced code and inline code are protected with sentinels so they survive translation
 - **Real terminal**, powered by `portable-pty` and xterm.js, with backlog replay on reattach
 - **Session mirror** from Claude Code's JSONL transcript

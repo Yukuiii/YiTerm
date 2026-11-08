@@ -1,7 +1,8 @@
 //! Local translation through the embedded Hy-MT2-1.8B model (Q3_K_M GGUF).
 //!
-//! The model file is downloaded once, on first launch, from HuggingFace into
-//! the app's data directory and then loaded lazily on the first translation.
+//! The model file is downloaded on demand (Settings → 本地模型) from
+//! HuggingFace into the app's data directory and then loaded lazily on the
+//! first translation. Nothing is downloaded automatically at launch.
 //! Inference is CPU-only (Candle) and runs on a blocking thread; deltas are
 //! streamed through the same `Channel<TranslateEvent>` as the other modes.
 
@@ -21,7 +22,6 @@ use hy_mt_core::sampling::SamplingParams;
 use hy_mt_core::tokenizer::HyTokenizer;
 
 use super::{chunk, protect_code, restore_code, safe_stream_prefix, Direction, TranslateEvent};
-use crate::settings::TranslationSettings;
 use crate::state::AppState;
 
 pub const MODEL_FILE: &str = "Hy-MT2-1.8B.Q3_K_M.gguf";
@@ -149,12 +149,9 @@ pub fn models_dir(app: &AppHandle) -> PathBuf {
     }
 }
 
-/// Settings may point at a user-supplied GGUF; else the managed location.
-pub fn resolve_model_path(app: &AppHandle, settings: &TranslationSettings) -> PathBuf {
-    match settings.local_model_path.as_deref().map(str::trim) {
-        Some(p) if !p.is_empty() => PathBuf::from(p),
-        _ => models_dir(app).join(MODEL_FILE),
-    }
+/// Where the managed model download lives.
+pub fn model_path(app: &AppHandle) -> PathBuf {
+    models_dir(app).join(MODEL_FILE)
 }
 
 // ---------- download ----------
@@ -191,8 +188,7 @@ struct ModelProgress {
 }
 
 pub fn status(app: &AppHandle, state: &AppState) -> ModelStatus {
-    let settings = state.settings.read().unwrap().clone();
-    let path = resolve_model_path(app, &settings.translation);
+    let path = model_path(app);
     let dl = state.model.lock().unwrap();
     let (state_str, message) = if path.is_file() {
         ("ready", None)
@@ -233,8 +229,7 @@ fn emit_progress(app: &AppHandle, state: &str, downloaded: u64, total: u64, mess
 /// `model-progress` events.
 pub fn start_download(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let settings = state.settings.read().unwrap().clone();
-    let path = resolve_model_path(app, &settings.translation);
+    let path = model_path(app);
     if path.is_file() {
         return Ok(());
     }
@@ -265,9 +260,7 @@ pub fn start_download(app: &AppHandle) -> Result<(), String> {
 }
 
 async fn download_task(app: &AppHandle) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let settings = state.settings.read().unwrap().clone();
-    let path = resolve_model_path(app, &settings.translation);
+    let path = model_path(app);
     if path.is_file() {
         return Ok(());
     }
@@ -403,13 +396,7 @@ pub async fn delete_model(app: &AppHandle, state: &AppState) -> Result<(), Strin
             return Err("模型正在下载，无法删除".into());
         }
     }
-    let settings = state.settings.read().unwrap().clone();
-    let path = resolve_model_path(app, &settings.translation);
-    // Never delete a file the user pointed at themselves — only the managed
-    // download is ours to remove.
-    if path != models_dir(app).join(MODEL_FILE) {
-        return Err("当前使用自定义模型路径，请在文件系统中手动删除".into());
-    }
+    let path = model_path(app);
     let part = path.with_extension("part");
     for p in [&path, &part] {
         match std::fs::remove_file(p) {
@@ -483,8 +470,7 @@ pub async fn translate(
         text: String::new(),
     });
 
-    let settings = state.settings.read().unwrap().clone();
-    let path = resolve_model_path(app, &settings.translation);
+    let path = model_path(app);
     let translator = match get_translator(state, &path).await {
         Ok(t) => t,
         Err(e) => return emit_error(e),

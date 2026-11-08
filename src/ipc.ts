@@ -25,8 +25,6 @@ export interface TranslationSettings {
   targetZh: string;
   chatBaseUrl: string | null;
   chatModelId: string | null;
-  /** Custom GGUF path for local mode; null → managed download location. */
-  localModelPath: string | null;
 }
 
 export interface Settings {
