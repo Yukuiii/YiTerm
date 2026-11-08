@@ -151,16 +151,11 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const chatProvider: ChatProviderId = t.chatProvider ?? 'custom';
   const providerPreset = chatProvider === 'custom' ? null : CHAT_PROVIDERS[chatProvider];
   const deeplProtocol = t.deeplProtocol ?? 'deepl';
-  // Google and the built-in DeepL anonymous channel share the "free channel"
-  // mode; the stored settings still use their existing mode/protocol values.
-  const freeChannel: 'google' | 'deepl' | null =
-    t.mode === 'google'
-      ? 'google'
-      : t.mode === 'deepl' && deeplProtocol === 'oneshot'
-        ? 'deepl'
-        : null;
-  const deepLApi = t.mode === 'deepl' && freeChannel === null;
-  const deepLProtocolValue = deeplProtocol === 'oneshot' ? 'deepl' : deeplProtocol;
+  // Google and the built-in DeepL channel ("dlx") share the "free channel"
+  // choice in the UI.
+  const freeChannel: 'google' | 'dlx' | null =
+    t.mode === 'google' ? 'google' : t.mode === 'dlx' ? 'dlx' : null;
+  const deepLApi = t.mode === 'deepl';
 
   /** Selecting a known provider pre-fills its endpoint and a default model. */
   const pickChatProvider = (id: ChatProviderId) => {
@@ -279,13 +274,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
               checked={freeChannel !== null}
               onChange={() => {
                 if (freeChannel === null) {
-                  setDraft({
-                    ...current,
-                    translation: {
-                      ...t,
-                      mode: t.deeplProtocol === 'oneshot' ? 'deepl' : 'google',
-                    },
-                  });
+                  setDraft({ ...current, translation: { ...t, mode: 'google' } });
                 }
               }}
             />
@@ -308,11 +297,11 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                   </button>
                   <button
                     type="button"
-                    className={`mode-btn ${freeChannel === 'deepl' ? 'active' : ''}`}
+                    className={`mode-btn ${freeChannel === 'dlx' ? 'active' : ''}`}
                     onClick={() =>
                       setDraft({
                         ...current,
-                        translation: { ...t, mode: 'deepl', deeplProtocol: 'oneshot' },
+                        translation: { ...t, mode: 'dlx' },
                       })
                     }
                   >
@@ -335,11 +324,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
               onChange={() =>
                 setDraft({
                   ...current,
-                  translation: {
-                    ...t,
-                    mode: 'deepl',
-                    deeplProtocol: deepLProtocolValue,
-                  },
+                  translation: { ...t, mode: 'deepl' },
                 })
               }
             />
@@ -441,7 +426,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
               <label>
                 协议
                 <Dropdown
-                  value={deepLProtocolValue}
+                  value={deeplProtocol}
                   options={DEEPL_PROTOCOL_OPTIONS}
                   onChange={(v) => patchTranslation({ deeplProtocol: v })}
                 />

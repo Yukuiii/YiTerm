@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranslationSettings {
-    /// "google" (built-in free endpoint), "chat" (OpenAI-compatible), or
-    /// "local" (embedded Hy-MT2-1.8B, offline).
+    /// "google" (free endpoint), "dlx" (built-in DeepL anonymous channel),
+    /// "deepl" (official API or a DeepLX-compatible gateway), "chat"
+    /// (OpenAI-compatible), or "local" (embedded Hy-MT2-1.8B, offline).
     #[serde(default = "default_mode")]
     pub mode: String,
     /// Target language for the en→native direction.
@@ -25,8 +26,7 @@ pub struct TranslationSettings {
     /// from the key suffix.
     #[serde(default)]
     pub deepl_api_url: Option<String>,
-    /// "deepl" (official API), "deeplx" (DeepLX-compatible gateway), or
-    /// "oneshot" (built-in anonymous channel, no key or gateway).
+    /// "deepl" (official API) or "deeplx" (DeepLX-compatible gateway).
     #[serde(default)]
     pub deepl_protocol: Option<String>,
 }
@@ -101,12 +101,27 @@ pub struct Settings {
 impl Settings {
     pub fn load(config_dir: &Path) -> Self {
         let path = config_dir.join("settings.json");
-        match std::fs::read(&path) {
+        let mut settings = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
                 tracing::warn!(?path, error = %e, "corrupt settings.json, using defaults");
                 Settings::default()
             }),
             Err(_) => Settings::default(),
+        };
+        settings.normalize();
+        settings
+    }
+
+    /// Migrates settings written by older builds.
+    ///
+    /// The built-in DeepL free channel used to be stored as mode "deepl"
+    /// with protocol "oneshot"; it is now a mode of its own, "dlx".
+    pub fn normalize(&mut self) {
+        if self.translation.mode == "deepl"
+            && self.translation.deepl_protocol.as_deref() == Some("oneshot")
+        {
+            self.translation.mode = "dlx".to_string();
+            self.translation.deepl_protocol = None;
         }
     }
 
@@ -267,5 +282,26 @@ mod tests {
         .unwrap();
         let back: TranslationSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.chat_provider, "openrouter");
+    }
+
+    #[test]
+    fn legacy_oneshot_protocol_migrates_to_dlx_mode() {
+        let mut s: Settings =
+            serde_json::from_str(r#"{"translation":{"mode":"deepl","deeplProtocol":"oneshot"}}"#)
+                .unwrap();
+        s.normalize();
+        assert_eq!(s.translation.mode, "dlx");
+        assert_eq!(s.translation.deepl_protocol, None);
+
+        // The gateway protocol is left alone.
+        let mut gateway: Settings =
+            serde_json::from_str(r#"{"translation":{"mode":"deepl","deeplProtocol":"deeplx"}}"#)
+                .unwrap();
+        gateway.normalize();
+        assert_eq!(gateway.translation.mode, "deepl");
+        assert_eq!(
+            gateway.translation.deepl_protocol.as_deref(),
+            Some("deeplx")
+        );
     }
 }

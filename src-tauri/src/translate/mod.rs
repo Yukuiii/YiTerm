@@ -561,6 +561,7 @@ pub async fn run(
             )
             .await
         }
+        "dlx" => oneshot::translate(http, direction, text, request_id, channel).await,
         "deepl" => {
             let protocol = deepl::protocol(settings.deepl_protocol.as_deref());
             deepl::translate(

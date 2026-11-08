@@ -171,10 +171,10 @@ export default function App() {
       : settings?.translation.mode === 'local'
         ? '本地翻译 · Hy-MT2-1.8B'
         : settings?.translation.mode === 'deepl'
-          ? settings.translation.deeplProtocol === 'oneshot'
+          ? 'DeepL 翻译'
+          : settings?.translation.mode === 'dlx'
             ? 'DeepL 免费通道'
-            : 'DeepL 翻译'
-          : 'Google 翻译';
+            : 'Google 翻译';
   const statusKind = !activeId
     ? 'idle'
     : exitCode !== undefined

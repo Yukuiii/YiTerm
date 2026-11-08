@@ -717,9 +717,10 @@ pub fn settings_get(state: State<'_, AppState>) -> crate::settings::Settings {
 pub fn settings_set(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    settings: crate::settings::Settings,
+    mut settings: crate::settings::Settings,
 ) -> Result<(), String> {
     let dir = state.config_dir(&app);
+    settings.normalize();
     settings.save(&dir)?;
     *state.settings.write().unwrap() = settings;
     Ok(())

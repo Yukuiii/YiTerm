@@ -39,9 +39,6 @@ pub enum Protocol {
     DeepL,
     /// DeepLX-compatible gateway (`{text, target_lang}` → `{code, data}`).
     DeepLx,
-    /// Built-in anonymous channel that mimics DeepL's iOS app; no key or
-    /// gateway required.
-    OneShot,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -54,7 +51,6 @@ pub enum Auth {
 pub fn protocol(value: Option<&str>) -> Protocol {
     match value.map(str::trim) {
         Some("deeplx") => Protocol::DeepLx,
-        Some("oneshot") => Protocol::OneShot,
         _ => Protocol::DeepL,
     }
 }
@@ -70,8 +66,6 @@ fn auth(protocol: Protocol, api_key: &str) -> Auth {
         Protocol::DeepL => Auth::DeepLAuthKey,
         // DLX-style gateways use a Bearer token (often embedded in the URL).
         Protocol::DeepLx => Auth::Bearer,
-        // Handled before auth is computed; kept for exhaustiveness.
-        Protocol::OneShot => Auth::None,
     }
 }
 
@@ -93,10 +87,6 @@ pub async fn translate(
     request_id: &str,
     channel: &Channel<TranslateEvent>,
 ) -> Result<String, String> {
-    if protocol == Protocol::OneShot {
-        return super::oneshot::translate(http, direction, text, request_id, channel).await;
-    }
-
     let custom = api_url.map(str::trim).filter(|u| !u.is_empty());
     if protocol == Protocol::DeepLx && custom.is_none() {
         return Err(
@@ -125,7 +115,7 @@ pub async fn translate(
             continue;
         }
         // Official DeepL wants an array of texts; DeepLX-style gateways take a
-        // plain string. (OneShot returned above.)
+        // plain string.
         let body = if protocol == Protocol::DeepL {
             json!({
                 "text": [part],
@@ -225,7 +215,6 @@ mod tests {
     fn protocol_and_auth_defaults() {
         assert_eq!(protocol(None), Protocol::DeepL);
         assert_eq!(protocol(Some("deeplx")), Protocol::DeepLx);
-        assert_eq!(protocol(Some("oneshot")), Protocol::OneShot);
         assert_eq!(auth(Protocol::DeepL, "key"), Auth::DeepLAuthKey);
         assert_eq!(auth(Protocol::DeepLx, "key"), Auth::Bearer);
         assert_eq!(auth(Protocol::DeepLx, "  "), Auth::None);
