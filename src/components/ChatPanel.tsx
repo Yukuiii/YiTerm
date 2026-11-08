@@ -7,6 +7,7 @@ import {
   encodeBytesToBase64,
   hasCJK,
   terminalSendPrompt,
+  terminalWrite,
 } from '../ipc';
 import { useChatStore } from '../stores/chat';
 import { useTerminalsStore } from '../stores/terminals';
@@ -248,6 +249,27 @@ export default function ChatPanel({ convId }: { convId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pending, terminal?.terminalId, exited, convId]);
 
+  // Esc on the chat page interrupts the running turn, mirroring the terminal.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
+      const target = e.target instanceof Element ? e.target : null;
+      // Menus/modals own their Esc, and xterm already writes the key to the PTY.
+      if (target?.closest('.sidebar, .settings-overlay, .dropdown-menu, .xterm')) return;
+      const list = useChatStore.getState().byConv[convId] ?? [];
+      const pending = list.length > 0 && list[list.length - 1].role === 'user';
+      // The busy flag comes from a 300 ms transcript poll; a trailing user
+      // bubble also means a turn may be waiting for its first reply.
+      if (!useTerminalsStore.getState().busyConv[convId] && !pending) return;
+      const termId = useTerminalsStore.getState().byConv[convId]?.terminalId;
+      if (termId === undefined) return;
+      e.preventDefault();
+      void terminalWrite(termId, '\x1b', false).catch(() => {});
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [convId]);
+
   const sendAsIs = async (key: string, original: string) => {
     const termId = terminal?.terminalId;
     if (termId === undefined) return;
@@ -345,7 +367,9 @@ export default function ChatPanel({ convId }: { convId: string }) {
             ref={inputRef}
             value={input}
             rows={1}
-            placeholder={exited !== undefined ? '终端已退出' : '输入中文（Enter 发送，Shift+Enter 换行）'}
+            placeholder={
+              exited !== undefined ? '终端已退出' : '输入中文（Enter 发送，Shift+Enter 换行，Esc 中断）'
+            }
             disabled={exited !== undefined}
             onChange={(e) => setInput(e.target.value)}
             onPaste={onPaste}
