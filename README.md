@@ -8,8 +8,10 @@
 
 <p align="center">
   <strong>Claude Code, in Chinese.</strong><br>
-  An unofficial bilingual macOS desktop shell for
-  <a href="https://github.com/anthropics/claude-code">Claude Code</a>.
+  An unofficial macOS desktop shell for
+  <a href="https://github.com/anthropics/claude-code">Claude Code</a> — your Chinese
+  is translated to English on the way in, and Claude's English is translated back
+  to Chinese on the way out.
 </p>
 
 <p align="center">

@@ -1,7 +1,7 @@
 [package]
 name = "yiterm"
 version = "0.1.0"
-description = "YiTerm — bilingual shell around Claude Code"
+description = "YiTerm — Chinese-first desktop shell for Claude Code"
 authors = ["admin"]
 license = ""
 repository = ""
