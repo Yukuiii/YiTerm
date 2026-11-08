@@ -326,6 +326,20 @@ pub fn terminal_write(
                 conversation_id: handle.conv_id.clone(),
             },
         );
+
+        // Claude Code restores the aborted prompt into its own input. Its
+        // clear gesture is an Esc double-tap. Write directly to the PTY so the
+        // clearing Escs don't re-enter this interrupt path.
+        if was_busy == Some(true) {
+            let clear = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tracing::info!(id = clear.id, "interrupt clear: esc double tap");
+                let _ = clear.write("\x1b", false);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let _ = clear.write("\x1b", false);
+            });
+        }
     }
     Ok(())
 }

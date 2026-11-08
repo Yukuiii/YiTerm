@@ -264,6 +264,7 @@ export default function ChatPanel({ convId }: { convId: string }) {
       const termId = useTerminalsStore.getState().byConv[convId]?.terminalId;
       if (termId === undefined) return;
       e.preventDefault();
+      // The backend clears Claude Code's restored input after the interrupt.
       void terminalWrite(termId, '\x1b', false).catch(() => {});
     };
     document.addEventListener('keydown', onKeyDown);
