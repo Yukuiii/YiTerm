@@ -73,6 +73,15 @@ export interface Msg {
   files?: string[];
 }
 
+/**
+ * Claude Code writes this local placeholder when a request is aborted before
+ * any API response. It is not a real assistant turn — Claude's own UI hides
+ * it — so neither the mirror nor restored history should keep it.
+ */
+function isSyntheticNoResponse(m: Msg): boolean {
+  return m.role === 'assistant' && m.original.trim() === 'No response requested.';
+}
+
 interface ChatStore {
   byConv: Record<string, Msg[]>;
   /**
@@ -209,17 +218,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const live = s.byConv[convId] ?? [];
         const liveKeys = new Set(live.map((m) => m.key));
         const merged = [
-          ...saved.filter((m) => !liveKeys.has(m.key)).map((m) => {
-            const restored: Msg = {
-              ...m,
-              // A crash mid-translation leaves working=true forever — settle it.
-              working: false,
-              // Older caches predate tool capture.
-              toolCalls: m.toolCalls ?? [],
-            };
-            return restored;
-          }),
-          ...live,
+          ...saved
+            .filter((m) => !liveKeys.has(m.key) && !isSyntheticNoResponse(m))
+            .map((m) => {
+              const restored: Msg = {
+                ...m,
+                // A crash mid-translation leaves working=true forever — settle it.
+                working: false,
+                // Older caches predate tool capture.
+                toolCalls: m.toolCalls ?? [],
+              };
+              return restored;
+            }),
+          ...live.filter((m) => !isSyntheticNoResponse(m)),
         ];
         return { byConv: { ...s.byConv, [convId]: merged } };
       });

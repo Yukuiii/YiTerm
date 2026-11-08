@@ -309,6 +309,22 @@ pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
             if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
                 return Vec::new();
             }
+            // Claude Code synthesizes this placeholder locally when a request
+            // is aborted or queued without an API response; its own UI hides
+            // it, so the mirror should not show "无需回复。".
+            if message.get("model").and_then(Value::as_str) == Some("<synthetic>")
+                && message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|blocks| {
+                        blocks.len() == 1
+                            && blocks[0].get("type").and_then(Value::as_str) == Some("text")
+                            && blocks[0].get("text").and_then(Value::as_str)
+                                == Some("No response requested.")
+                    })
+            {
+                return Vec::new();
+            }
             let Some(key) = message
                 .get("id")
                 .and_then(Value::as_str)
@@ -617,6 +633,29 @@ mod tests {
             let v = json!({ "type": t, "message": { "role": "user", "content": "x" } });
             assert!(parse_line(&v).is_empty(), "{t} should be ignored");
         }
+    }
+
+    #[test]
+    fn ignores_the_synthetic_no_response_message() {
+        let synthetic = json!({
+            "type": "assistant", "uuid": "a3",
+            "message": {
+                "id": "msg_3", "model": "<synthetic>",
+                "stop_reason": "stop_sequence",
+                "content": [{ "type": "text", "text": "No response requested." }]
+            }
+        });
+        assert!(parse_line(&synthetic).is_empty());
+
+        // The same words in a real assistant message still surface.
+        let real = json!({
+            "type": "assistant", "uuid": "a4",
+            "message": {
+                "id": "msg_4", "model": "claude",
+                "content": [{ "type": "text", "text": "No response requested." }]
+            }
+        });
+        assert_eq!(parse_line(&real).len(), 1);
     }
 
     #[test]
