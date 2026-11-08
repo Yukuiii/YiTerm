@@ -6209,7 +6209,7 @@ dependencies = [
 
 [[package]]
 name = "yiterm"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "base64 0.22.1",
  "dirs 5.0.1",
