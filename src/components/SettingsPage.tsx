@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   apiKeyGet,
   apiKeySet,
@@ -9,11 +9,14 @@ import {
   translate,
   type ModelStatus,
   type Settings,
+  type TerminalSettings,
 } from '../ipc';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { useSettingsStore } from '../stores/settings';
 
 const fmtMB = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
+
+const DEFAULT_TERMINAL: TerminalSettings = { fontFamily: null, fontSize: 13, lineHeight: 1.1 };
 
 type ChatProviderId = 'siliconflow' | 'openrouter' | 'custom';
 
@@ -50,6 +53,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const [saved, setSaved] = useState(false);
   const [model, setModel] = useState<ModelStatus | null>(null);
   const [hasKey, setHasKey] = useState(false);
+  const terminalSaveTimer = useRef<number | undefined>(undefined);
 
   const current = draft ?? settings;
   // Provider is stored per key, so the "saved" state follows the draft.
@@ -100,6 +104,20 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
 
   if (!current) return null;
   const t = current.translation;
+  // Typography is tuned by eye: apply terminal changes immediately and persist
+  // them without waiting for the bottom 保存 button.
+  const updateTerminal = (patch: Partial<TerminalSettings>) => {
+    const terminal = { ...(current.terminal ?? DEFAULT_TERMINAL), ...patch };
+    setDraft({ ...current, terminal });
+    const stored = useSettingsStore.getState().settings;
+    if (!stored) return;
+    if (terminalSaveTimer.current !== undefined) {
+      window.clearTimeout(terminalSaveTimer.current);
+    }
+    terminalSaveTimer.current = window.setTimeout(() => {
+      void save({ ...stored, terminal });
+    }, 200);
+  };
   const chatProvider: ChatProviderId = t.chatProvider ?? 'custom';
   const providerPreset = chatProvider === 'custom' ? null : CHAT_PROVIDERS[chatProvider];
 
@@ -320,6 +338,49 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
               </div>
             </div>
           )}
+        </section>
+
+        <section>
+          <h3>终端</h3>
+          <div className="chat-config">
+            <label>
+              字体（留空使用内置 Ioskeley Mono）
+              <input
+                type="text"
+                placeholder="例如 JetBrains Mono"
+                value={(current.terminal ?? DEFAULT_TERMINAL).fontFamily ?? ''}
+                onChange={(e) => updateTerminal({ fontFamily: e.target.value || null })}
+              />
+            </label>
+            <label>
+              字号（8–32）
+              <input
+                type="number"
+                min={8}
+                max={32}
+                step={0.5}
+                value={(current.terminal ?? DEFAULT_TERMINAL).fontSize}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (Number.isFinite(n)) updateTerminal({ fontSize: n });
+                }}
+              />
+            </label>
+            <label>
+              行高（0.8–3.0）
+              <input
+                type="number"
+                min={0.8}
+                max={3}
+                step={0.1}
+                value={(current.terminal ?? DEFAULT_TERMINAL).lineHeight}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (Number.isFinite(n)) updateTerminal({ lineHeight: n });
+                }}
+              />
+            </label>
+          </div>
         </section>
 
         <section>

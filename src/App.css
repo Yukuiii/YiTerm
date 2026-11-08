@@ -481,7 +481,7 @@ button, input, textarea { font-family: inherit; }
   min-height: 0;
   min-width: 0;
   display: grid;
-  grid-template-columns: var(--chat-size, 56%) 6px minmax(0, 1fr);
+  grid-template-columns: var(--chat-size, 50%) 6px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
 }
 .session.cowork {
@@ -1233,7 +1233,7 @@ button, input, textarea { font-family: inherit; }
   color: var(--fg-muted);
   font-size: 12.5px;
 }
-.settings-card input[type="text"], .settings-card input[type="password"] {
+.settings-card input[type="text"], .settings-card input[type="password"], .settings-card input[type="number"] {
   padding: 8px 10px;
   background: #111111;
   border: 1px solid #2e2e2e;

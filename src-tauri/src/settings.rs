@@ -47,11 +47,43 @@ impl Default for TranslationSettings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSettings {
+    /// Custom font family; None/empty → the bundled Ioskeley Mono stack.
+    #[serde(default)]
+    pub font_family: Option<String>,
+    #[serde(default = "default_term_font_size")]
+    pub font_size: f32,
+    #[serde(default = "default_term_line_height")]
+    pub line_height: f32,
+}
+
+fn default_term_font_size() -> f32 {
+    13.0
+}
+
+fn default_term_line_height() -> f32 {
+    1.1
+}
+
+impl Default for TerminalSettings {
+    fn default() -> Self {
+        Self {
+            font_family: None,
+            font_size: default_term_font_size(),
+            line_height: default_term_line_height(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     #[serde(default)]
     pub translation: TranslationSettings,
+    #[serde(default)]
+    pub terminal: TerminalSettings,
     /// None → auto-detect: $HOME/.local/bin/claude, then PATH.
     pub claude_path: Option<String>,
 }
@@ -210,6 +242,14 @@ mod tests {
         assert_eq!(api_key_get(&dir, "siliconflow"), None);
         assert_eq!(api_key_get(&dir, "openrouter").as_deref(), Some("sk-or"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn terminal_settings_default_when_missing() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.terminal.font_family, None);
+        assert_eq!(s.terminal.font_size, 13.0);
+        assert_eq!(s.terminal.line_height, 1.1);
     }
 
     #[test]

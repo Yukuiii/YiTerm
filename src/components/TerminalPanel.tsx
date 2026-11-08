@@ -10,12 +10,44 @@ import {
   type TerminalEvent,
 } from '../ipc';
 import { useTerminalsStore } from '../stores/terminals';
+import { useSettingsStore } from '../stores/settings';
 import '@xterm/xterm/css/xterm.css';
+
+const DEFAULT_FONT_SIZE = 13;
+const DEFAULT_LINE_HEIGHT = 1.1;
+const BUNDLED_FONT = "'Ioskeley Mono Term', ui-monospace, SFMono-Regular, Menlo, monospace";
+
+function fontStack(family?: string | null): string {
+  const custom = family?.replace(/["']/g, '').trim();
+  return custom
+    ? `"${custom}", ui-monospace, SFMono-Regular, Menlo, monospace`
+    : BUNDLED_FONT;
+}
+
+function applyTermOptions(
+  term: Terminal,
+  fontFamily?: string | null,
+  fontSize?: number,
+  lineHeight?: number,
+) {
+  term.options.fontFamily = fontStack(fontFamily);
+  term.options.fontSize = Math.min(32, Math.max(8, fontSize ?? DEFAULT_FONT_SIZE));
+  term.options.lineHeight = Math.min(3, Math.max(0.8, lineHeight ?? DEFAULT_LINE_HEIGHT));
+}
 
 export default function TerminalPanel({ convId }: { convId: string }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
   const terminalIdRef = useRef<number | null>(null);
+  const termSettings = useSettingsStore((s) => s.settings?.terminal);
+  const fontFamily = termSettings?.fontFamily;
+  const fontSize = termSettings?.fontSize;
+  const lineHeight = termSettings?.lineHeight;
+  // Latest settings for the initial terminal construction (the settings store
+  // may load after this component mounts).
+  const settingsRef = useRef(termSettings);
+  settingsRef.current = termSettings;
   const [attempt, setAttempt] = useState(0);
   const ensureStarted = useTerminalsStore((s) => s.ensureStarted);
   const markExited = useTerminalsStore((s) => s.markExited);
@@ -33,6 +65,7 @@ export default function TerminalPanel({ convId }: { convId: string }) {
     let observer: ResizeObserver | null = null;
     let term: Terminal | null = null;
     let fit: FitAddon | null = null;
+    const ts = settingsRef.current;
 
     (async () => {
       // 1. Ensure a live terminal + follower exist for this conversation.
@@ -44,13 +77,16 @@ export default function TerminalPanel({ convId }: { convId: string }) {
       terminalIdRef.current = info.terminalId;
 
       // 2. Wait for the bundled terminal font, otherwise xterm measures the
-      // fallback face and the glyph cells come out the wrong size.
-      await Promise.all([
-        document.fonts.load('400 12.5px "Ioskeley Mono Term"'),
-        document.fonts.load('700 12.5px "Ioskeley Mono Term"'),
-        document.fonts.load('italic 400 12.5px "Ioskeley Mono Term"'),
-        document.fonts.load('italic 700 12.5px "Ioskeley Mono Term"'),
-      ]).catch(() => {});
+      // fallback face and the glyph cells come out the wrong size. A custom
+      // family is system-installed, so there is nothing to load.
+      if (!ts?.fontFamily?.trim()) {
+        await Promise.all([
+          document.fonts.load('400 13px "Ioskeley Mono Term"'),
+          document.fonts.load('700 13px "Ioskeley Mono Term"'),
+          document.fonts.load('italic 400 13px "Ioskeley Mono Term"'),
+          document.fonts.load('italic 700 13px "Ioskeley Mono Term"'),
+        ]).catch(() => {});
+      }
       if (disposed) return;
 
       // 3. Build the xterm view.
@@ -70,6 +106,11 @@ export default function TerminalPanel({ convId }: { convId: string }) {
       term.loadAddon(fit);
       term.open(hostRef.current!);
       termRef.current = term;
+      fitRef.current = fit;
+      // Apply the latest typography after construction too: the settings store
+      // can update while this async effect is still starting the PTY.
+      const latest = settingsRef.current;
+      applyTermOptions(term, latest?.fontFamily, latest?.fontSize, latest?.lineHeight);
       try { fit.fit(); } catch { /* host not sized yet */ }
       void terminalResize(info.terminalId, term.cols, term.rows);
 
@@ -112,10 +153,25 @@ export default function TerminalPanel({ convId }: { convId: string }) {
       observer?.disconnect();
       term?.dispose();
       termRef.current = null;
+      fitRef.current = null;
     };
     // convId / attempt change → full remount. ensureStarted/markExited are stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [convId, attempt]);
+
+  // Apply font/size/line-height changes without restarting the PTY.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    applyTermOptions(term, fontFamily, fontSize, lineHeight);
+    try {
+      fitRef.current?.fit();
+    } catch {
+      /* host not sized yet */
+    }
+    const id = terminalIdRef.current;
+    if (id !== null) void terminalResize(id, term.cols, term.rows);
+  }, [fontFamily, fontSize, lineHeight]);
 
   return (
     <div className="term-panel">

@@ -28,8 +28,15 @@ export interface TranslationSettings {
   chatModelId: string | null;
 }
 
+export interface TerminalSettings {
+  fontFamily: string | null;
+  fontSize: number;
+  lineHeight: number;
+}
+
 export interface Settings {
   translation: TranslationSettings;
+  terminal: TerminalSettings;
   claudePath: string | null;
 }
 
