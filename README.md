@@ -60,7 +60,7 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 - **Claude Code records in the sidebar** — every project registered in
   `~/.claude.json` plus existing CLI sessions are listed and resumable;
   replayed history is shown as-is, while new replies are still translated
-- **Two layouts**: Code (chat + terminal) and Cowork (chat only)
+- **Two layouts**: Code (chat + terminal) and Work (chat only)
 - **Persistence**: conversations, chat history, and translation settings
 - **API keys in a local `keys.json`** (one per chat provider)
 - **System proxy detection** via `scutil`, so translation works behind a local proxy

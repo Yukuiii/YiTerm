@@ -106,16 +106,16 @@ export default function Sidebar({
   return (
     <aside className="sidebar">
       <div className="sidebar-top" data-tauri-drag-region>
-        <div className="mode-switch" role="tablist" aria-label="界面模式">
+        <div className="mode-switch in-sidebar" role="tablist" aria-label="界面模式">
           <button
-            className={`mode-btn ${mode === 'cowork' ? 'active' : ''}`}
+            className={`mode-btn ${mode === 'work' ? 'active' : ''}`}
             role="tab"
-            aria-selected={mode === 'cowork'}
-            onClick={() => onModeChange('cowork')}
+            aria-selected={mode === 'work'}
+            onClick={() => onModeChange('work')}
             title="仅对话"
           >
             <ChatIcon size={14} />
-            Cowork
+            Work
           </button>
           <button
             className={`mode-btn ${mode === 'code' ? 'active' : ''}`}

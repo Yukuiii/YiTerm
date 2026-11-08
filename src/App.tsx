@@ -50,7 +50,7 @@ export default function App() {
 
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     const saved = localStorage.getItem('yiterm.viewMode');
-    return saved === 'cowork' || saved === 'code' ? saved : 'code';
+    return saved === 'work' || saved === 'code' ? saved : 'code';
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [newFolder, setNewFolder] = useState<string | null>(null);
@@ -286,7 +286,7 @@ export default function App() {
             <button
               className={`icon-btn ${viewMode === 'code' ? 'active' : ''}`}
               title={viewMode === 'code' ? '隐藏终端' : '显示终端'}
-              onClick={() => setViewMode(viewMode === 'code' ? 'cowork' : 'code')}
+              onClick={() => setViewMode(viewMode === 'code' ? 'work' : 'code')}
             >
               <TerminalIcon size={17} />
             </button>
