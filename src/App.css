@@ -1054,6 +1054,24 @@ button, input, textarea { font-family: inherit; }
   white-space: nowrap;
 }
 
+.status-session {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: #6f6f6f;
+}
+.status-session-label { flex: none; color: #6a6a6a; }
+.status-session-id {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Ioskeley Mono Term', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  color: #7d7d7d;
+  cursor: text;
+}
+
 .status-item { white-space: nowrap; }
 .status-item + .status-item::before {
   content: '·';

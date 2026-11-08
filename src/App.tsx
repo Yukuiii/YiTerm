@@ -339,6 +339,15 @@ export default function App() {
                 {statusFolder ? folderName(statusFolder) : '未选择项目'}
               </span>
             </button>
+            {activeConv && (
+              <span
+                className="status-session"
+                title={`当前 Claude 会话 ID：${activeConv.sessionId}（转录名 / --resume 用）`}
+              >
+                <span className="status-session-label">会话</span>
+                <span className="status-session-id">{activeConv.sessionId}</span>
+              </span>
+            )}
           </div>
           <div className="status-right">
             <span className="status-item">{translationLabel}</span>
