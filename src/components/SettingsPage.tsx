@@ -15,15 +15,15 @@ import {
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { useSettingsStore } from '../stores/settings';
 import Dropdown from './Dropdown';
+import { ChatIcon, SlidersIcon, TerminalIcon, XIcon } from './Icons';
 
 const fmtMB = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
 
 const DEFAULT_TERMINAL: TerminalSettings = { fontFamily: null, fontSize: 13, lineHeight: 1.1 };
 
-const DEEPL_PROTOCOL_OPTIONS: { value: 'deepl' | 'deeplx' | 'oneshot'; label: string }[] = [
+const DEEPL_PROTOCOL_OPTIONS: { value: 'deepl' | 'deeplx'; label: string }[] = [
   { value: 'deepl', label: 'DeepL 官方格式' },
   { value: 'deeplx', label: 'DeepLX 网关（text 为字符串）' },
-  { value: 'oneshot', label: '内置免费通道（无需 Key）' },
 ];
 
 type ChatProviderId = 'siliconflow' | 'openrouter' | 'custom';
@@ -51,10 +51,27 @@ const CHAT_PROVIDER_OPTIONS: { id: ChatProviderId; label: string }[] = [
   { id: 'custom', label: '自定义' },
 ];
 
+const SETTINGS_NAV = [
+  {
+    group: '偏好',
+    items: [
+      { id: 'translation', label: '翻译', Icon: ChatIcon },
+      { id: 'terminal', label: '终端', Icon: TerminalIcon },
+    ],
+  },
+  {
+    group: '应用',
+    items: [{ id: 'general', label: '通用', Icon: SlidersIcon }],
+  },
+] as const;
+
+type SettingsTab = (typeof SETTINGS_NAV)[number]['items'][number]['id'];
+
 export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const { settings, save } = useSettingsStore();
   // Edits live in a draft; when untouched the loaded settings are the value.
   const [draft, setDraft] = useState<Settings | null>(null);
+  const [tab, setTab] = useState<SettingsTab>('translation');
   const [apiKeyDraft, setApiKeyDraft] = useState('');
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
@@ -134,6 +151,16 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const chatProvider: ChatProviderId = t.chatProvider ?? 'custom';
   const providerPreset = chatProvider === 'custom' ? null : CHAT_PROVIDERS[chatProvider];
   const deeplProtocol = t.deeplProtocol ?? 'deepl';
+  // Google and the built-in DeepL anonymous channel share the "free channel"
+  // mode; the stored settings still use their existing mode/protocol values.
+  const freeChannel: 'google' | 'deepl' | null =
+    t.mode === 'google'
+      ? 'google'
+      : t.mode === 'deepl' && deeplProtocol === 'oneshot'
+        ? 'deepl'
+        : null;
+  const deepLApi = t.mode === 'deepl' && freeChannel === null;
+  const deepLProtocolValue = deeplProtocol === 'oneshot' ? 'deepl' : deeplProtocol;
 
   /** Selecting a known provider pre-fills its endpoint and a default model. */
   const pickChatProvider = (id: ChatProviderId) => {
@@ -209,35 +236,116 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
       <div className="settings-card">
         <div className="settings-head">
           <h2>设置</h2>
-          <button className="icon-btn" onClick={onClose}>✕</button>
+          <div className="settings-head-actions">
+            <button className="primary-btn settings-save" onClick={() => void saveAll()}>
+              {saved ? '已保存 ✓' : '保存'}
+            </button>
+            <button className="icon-btn" onClick={onClose} aria-label="关闭设置">
+              <XIcon size={16} />
+            </button>
+          </div>
         </div>
 
-        <section>
-          <h3>翻译方式</h3>
+        <div className="settings-main">
+          <nav className="settings-nav" aria-label="设置分类">
+            {SETTINGS_NAV.map((group) => (
+              <div className="settings-nav-group" key={group.group}>
+                <div className="settings-nav-title">{group.group}</div>
+                {group.items.map(({ id, label, Icon }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    className={`settings-nav-item ${tab === id ? 'active' : ''}`}
+                    aria-current={tab === id ? 'page' : undefined}
+                    onClick={() => setTab(id)}
+                  >
+                    <Icon size={16} />
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </div>
+            ))}
+          </nav>
+
+          <div className="settings-content">
+            {tab === 'translation' && (
+              <>
+                <h2 className="settings-section-title">翻译</h2>
+                <section>
           <label className="radio-row">
             <input
               type="radio"
               name="mode"
-              checked={t.mode === 'google'}
-              onChange={() => setDraft({ ...current, translation: { ...t, mode: 'google' } })}
+              checked={freeChannel !== null}
+              onChange={() => {
+                if (freeChannel === null) {
+                  setDraft({
+                    ...current,
+                    translation: {
+                      ...t,
+                      mode: t.deeplProtocol === 'oneshot' ? 'deepl' : 'google',
+                    },
+                  });
+                }
+              }}
             />
             <div>
-              <div className="radio-title">Google 翻译（内置）</div>
-              <div className="radio-desc">免 Key，使用 Google 免费端点；可能遇到限流</div>
+              <div className="radio-title">免费通道</div>
+              <div className="radio-desc">Google 翻译或 DeepL 免费通道，无需 API Key</div>
             </div>
           </label>
+          {freeChannel !== null && (
+            <div className="chat-config">
+              <label>
+                服务
+                <div className="mode-switch">
+                  <button
+                    type="button"
+                    className={`mode-btn ${freeChannel === 'google' ? 'active' : ''}`}
+                    onClick={() => setDraft({ ...current, translation: { ...t, mode: 'google' } })}
+                  >
+                    Google
+                  </button>
+                  <button
+                    type="button"
+                    className={`mode-btn ${freeChannel === 'deepl' ? 'active' : ''}`}
+                    onClick={() =>
+                      setDraft({
+                        ...current,
+                        translation: { ...t, mode: 'deepl', deeplProtocol: 'oneshot' },
+                      })
+                    }
+                  >
+                    DeepL（DLX）
+                  </button>
+                </div>
+              </label>
+              <div className="radio-desc">
+                {freeChannel === 'google'
+                  ? '使用 Google 免费端点；可能遇到限流'
+                  : '内置 DeepL 匿名通道，无需 Key、无需自建服务；有频率限制'}
+              </div>
+            </div>
+          )}
           <label className="radio-row">
             <input
               type="radio"
               name="mode"
-              checked={t.mode === 'deepl'}
-              onChange={() => setDraft({ ...current, translation: { ...t, mode: 'deepl' } })}
+              checked={deepLApi}
+              onChange={() =>
+                setDraft({
+                  ...current,
+                  translation: {
+                    ...t,
+                    mode: 'deepl',
+                    deeplProtocol: deepLProtocolValue,
+                  },
+                })
+              }
             />
             <div>
-              <div className="radio-title">DeepL 翻译</div>
-              <div className="radio-desc">
-                官方 API（免费 Key 每月 50 万字符），或内置免费通道，无需 Key
-              </div>
+              <div className="radio-title">DeepL API / 网关</div>
+              <div className="radio-desc">官方 API（免费 Key 每月 50 万字符），或 DeepLX 兼容网关</div>
             </div>
           </label>
           <label className="radio-row">
@@ -328,69 +436,64 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
             </div>
           )}
 
-          {t.mode === 'deepl' && (
+          {deepLApi && (
             <div className="chat-config">
               <label>
                 协议
                 <Dropdown
-                  value={deeplProtocol}
+                  value={deepLProtocolValue}
                   options={DEEPL_PROTOCOL_OPTIONS}
                   onChange={(v) => patchTranslation({ deeplProtocol: v })}
                 />
               </label>
               <div className="radio-desc">
-                {deeplProtocol === 'oneshot'
-                  ? '直接调用 DeepL App 的匿名接口，不需要 API Key，也不需要自建 DLX 服务。有频率限制，接口可能随 DeepL 更新失效。'
-                  : '官方格式自动使用 Authorization: DeepL-Auth-Key；DeepLX 网关自动使用 Authorization: Bearer（Key 通常已包含在地址中）。'}
+                官方格式自动使用 Authorization: DeepL-Auth-Key；DeepLX 网关自动使用
+                Authorization: Bearer（Key 通常已包含在地址中）。
               </div>
-              {deeplProtocol !== 'oneshot' && (
-                <>
-                  <label>
-                    <span className="field-label">
-                      API Key（DeepLX 把 Key 放在地址里时可留空）
-                      {hasKey && <span className="key-badge">已保存</span>}
-                    </span>
-                    <input
-                      type="password"
-                      placeholder={
-                        hasKey ? '（已保存，输入可覆盖）' : 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx'
-                      }
-                      value={apiKeyDraft}
-                      onChange={(e) => setApiKeyDraft(e.target.value)}
-                    />
-                  </label>
-                  {hasKey && (
-                    <button
-                      className="ghost-btn"
-                      onClick={async () => {
-                        await apiKeySet(null, activeKeyProvider);
-                        setHasKey(false);
-                      }}
-                    >
-                      清除已保存的 API Key
-                    </button>
-                  )}
-                  <label>
-                    API 地址（留空自动判断）
-                    <input
-                      type="text"
-                      placeholder="https://api-free.deepl.com/v2/translate"
-                      value={t.deeplApiUrl ?? ''}
-                      onChange={(e) =>
-                        setDraft({
-                          ...current,
-                          translation: { ...t, deeplApiUrl: e.target.value || null },
-                        })
-                      }
-                    />
-                  </label>
-                  <div className="radio-desc">
-                    官方格式：:fx 免费 Key 走 api-free.deepl.com，其余走 api.deepl.com。DeepLX
-                    网关通常把 Key 放在地址里（如 api.deeplx.org/&lt;key&gt;/translate），请求体
-                    text 为字符串、返回 code/data。
-                  </div>
-                </>
+              <label>
+                <span className="field-label">
+                  API Key（DeepLX 把 Key 放在地址里时可留空）
+                  {hasKey && <span className="key-badge">已保存</span>}
+                </span>
+                <input
+                  type="password"
+                  placeholder={
+                    hasKey ? '（已保存，输入可覆盖）' : 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx'
+                  }
+                  value={apiKeyDraft}
+                  onChange={(e) => setApiKeyDraft(e.target.value)}
+                />
+              </label>
+              {hasKey && (
+                <button
+                  className="ghost-btn"
+                  onClick={async () => {
+                    await apiKeySet(null, activeKeyProvider);
+                    setHasKey(false);
+                  }}
+                >
+                  清除已保存的 API Key
+                </button>
               )}
+              <label>
+                API 地址（留空自动判断）
+                <input
+                  type="text"
+                  placeholder="https://api-free.deepl.com/v2/translate"
+                  value={t.deeplApiUrl ?? ''}
+                  onChange={(e) =>
+                    setDraft({
+                      ...current,
+                      translation: { ...t, deeplApiUrl: e.target.value || null },
+                    })
+                  }
+                />
+              </label>
+              <div className="radio-desc">
+                官方格式：:fx 免费 Key 走 api-free.deepl.com，其余走 api.deepl.com。DeepLX
+                网关通常把 Key 放在地址里（如 api.deeplx.org/&lt;key&gt;/translate），请求体
+                text 为字符串、返回 code/data。
+              </div>
             </div>
           )}
 
@@ -434,76 +537,103 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
               </div>
             </div>
           )}
-        </section>
+                </section>
+              </>
+            )}
 
-        <section>
-          <h3>终端</h3>
-          <div className="chat-config">
-            <label>
-              字体（留空使用内置 Ioskeley Mono）
-              <input
-                type="text"
-                placeholder="例如 JetBrains Mono"
-                value={(current.terminal ?? DEFAULT_TERMINAL).fontFamily ?? ''}
-                onChange={(e) => updateTerminal({ fontFamily: e.target.value || null })}
-              />
-            </label>
-            <label>
-              字号（8–32）
-              <input
-                type="number"
-                min={8}
-                max={32}
-                step={0.5}
-                value={(current.terminal ?? DEFAULT_TERMINAL).fontSize}
-                onChange={(e) => {
-                  const n = Number(e.target.value);
-                  if (Number.isFinite(n)) updateTerminal({ fontSize: n });
-                }}
-              />
-            </label>
-            <label>
-              行高（0.8–3.0）
-              <input
-                type="number"
-                min={0.8}
-                max={3}
-                step={0.1}
-                value={(current.terminal ?? DEFAULT_TERMINAL).lineHeight}
-                onChange={(e) => {
-                  const n = Number(e.target.value);
-                  if (Number.isFinite(n)) updateTerminal({ lineHeight: n });
-                }}
-              />
-            </label>
+            {tab === 'terminal' && (
+              <>
+                <h2 className="settings-section-title">终端</h2>
+                <section>
+                <div className="setting-rows">
+                  <div className="setting-row">
+                    <div className="setting-copy">
+                      <div className="setting-title">字体</div>
+                      <div className="setting-desc">留空使用内置 Ioskeley Mono</div>
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="例如 JetBrains Mono"
+                      value={(current.terminal ?? DEFAULT_TERMINAL).fontFamily ?? ''}
+                      onChange={(e) => updateTerminal({ fontFamily: e.target.value || null })}
+                    />
+                  </div>
+                  <div className="setting-row">
+                    <div className="setting-copy">
+                      <div className="setting-title">字号</div>
+                      <div className="setting-desc">可选范围 8–32</div>
+                    </div>
+                    <input
+                      type="number"
+                      min={8}
+                      max={32}
+                      step={0.5}
+                      value={(current.terminal ?? DEFAULT_TERMINAL).fontSize}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (Number.isFinite(n)) updateTerminal({ fontSize: n });
+                      }}
+                    />
+                  </div>
+                  <div className="setting-row">
+                    <div className="setting-copy">
+                      <div className="setting-title">行高</div>
+                      <div className="setting-desc">可选范围 0.8–3.0</div>
+                    </div>
+                    <input
+                      type="number"
+                      min={0.8}
+                      max={3}
+                      step={0.1}
+                      value={(current.terminal ?? DEFAULT_TERMINAL).lineHeight}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (Number.isFinite(n)) updateTerminal({ lineHeight: n });
+                      }}
+                    />
+                  </div>
+                </div>
+                </section>
+              </>
+            )}
+
+            {tab === 'translation' && (
+              <section>
+                <div className="setting-row">
+                  <div className="setting-copy">
+                    <div className="setting-title">测试</div>
+                    <div className="setting-desc">用当前配置翻译一句“你好，世界！”</div>
+                  </div>
+                  <button className="primary-btn" onClick={() => void runTest()} disabled={testing}>
+                    {testing ? '测试中…' : '测试'}
+                  </button>
+                </div>
+                {testResult && <div className="test-result">{testResult}</div>}
+              </section>
+            )}
+
+            {tab === 'general' && (
+              <>
+                <h2 className="settings-section-title">通用</h2>
+                <section>
+                  <div className="setting-row">
+                    <div className="setting-copy">
+                      <div className="setting-title">Claude CLI</div>
+                      <div className="setting-desc">
+                        留空自动检测 ~/.local/bin/claude 或 PATH
+                      </div>
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="~/.local/bin/claude"
+                      value={current.claudePath ?? ''}
+                      onChange={(e) => setDraft({ ...current, claudePath: e.target.value || null })}
+                    />
+                  </div>
+                </section>
+              </>
+            )}
           </div>
-        </section>
-
-        <section>
-          <h3>测试</h3>
-          <button className="primary-btn" onClick={() => void runTest()} disabled={testing}>
-            {testing ? '测试中…' : '翻译一句试试：“你好，世界！”'}
-          </button>
-          {testResult && <div className="test-result">{testResult}</div>}
-        </section>
-
-        <section>
-          <h3>Claude CLI</h3>
-          <label>
-            claude 可执行文件路径（留空自动检测）
-            <input
-              type="text"
-              placeholder="~/.local/bin/claude"
-              value={current.claudePath ?? ''}
-              onChange={(e) => setDraft({ ...current, claudePath: e.target.value || null })}
-            />
-          </label>
-        </section>
-
-        <div className="settings-foot">
-          <button className="primary-btn" onClick={() => void saveAll()}>
-            {saved ? '已保存 ✓' : '保存'}
-          </button>
         </div>
       </div>
     </div>
