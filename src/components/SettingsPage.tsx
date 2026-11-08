@@ -199,23 +199,14 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
 
           {t.mode === 'local' && (
             <div className="chat-config">
-              <label>
-                模型文件路径（留空使用内置下载位置）
-                <input
-                  type="text"
-                  placeholder={model?.path || '自动管理'}
-                  value={t.localModelPath ?? ''}
-                  onChange={(e) =>
-                    setDraft({ ...current, translation: { ...t, localModelPath: e.target.value || null } })
-                  }
-                />
-              </label>
               <div className="model-status">
                 {!model && <span>正在读取模型状态…</span>}
                 {model?.state === 'ready' && (
                   <span className="model-ready">✓ 模型已就绪（{model.path}）</span>
                 )}
-                {model?.state === 'missing' && <span>模型未下载（约 907 MB）。</span>}
+                {model?.state === 'missing' && (
+                  <span>模型未下载（约 907 MB），点击下方「下载模型」开始下载。</span>
+                )}
                 {model?.state === 'downloading' && (
                   <div className="model-progress-wrap">
                     <div className="model-progress">
@@ -238,14 +229,11 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     {model?.state === 'error' ? '重试下载' : '下载模型'}
                   </button>
                 )}
-                {model?.state === 'ready' && !(t.localModelPath ?? '').trim() && (
+                {model?.state === 'ready' && (
                   <button className="ghost-btn" onClick={() => void removeModel()}>
                     删除模型文件
                   </button>
                 )}
-              </div>
-              <div className="radio-desc">
-                首次启动应用时会在后台自动下载；保存路径设置后点击下方「保存」生效。
               </div>
             </div>
           )}

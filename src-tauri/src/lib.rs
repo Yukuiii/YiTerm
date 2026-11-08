@@ -18,11 +18,6 @@ pub fn run() {
             init_logging(app.handle().clone());
             let state = state::AppState::init(app.handle().clone());
             app.manage(state);
-            // First launch: fetch the local translation model (~907 MB) in
-            // the background so switching to local mode later is instant.
-            if let Err(e) = translate::local::start_download(app.handle()) {
-                tracing::warn!(error = %e, "could not start model download");
-            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

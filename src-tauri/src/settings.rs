@@ -17,8 +17,6 @@ pub struct TranslationSettings {
     pub target_zh: String,
     pub chat_base_url: Option<String>,
     pub chat_model_id: Option<String>,
-    /// Custom GGUF path for local mode; None → managed download location.
-    pub local_model_path: Option<String>,
 }
 
 fn default_mode() -> String {
@@ -36,7 +34,6 @@ impl Default for TranslationSettings {
             target_zh: default_target_zh(),
             chat_base_url: None,
             chat_model_id: None,
-            local_model_path: None,
         }
     }
 }
