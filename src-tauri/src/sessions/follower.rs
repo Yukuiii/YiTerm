@@ -58,6 +58,10 @@ pub fn spawn_follower(
         // state of the first batch is emitted, so resuming an idle session
         // doesn't flash a running spinner through its old turns.
         let mut live = false;
+        // Whether the last turn-changing line was a user prompt. A transcript
+        // that ends on one has no assistant reply, usually because the request
+        // was aborted before the CLI could write an interrupt marker.
+        let mut last_turn_was_user = false;
 
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -73,6 +77,7 @@ pub fn spawn_follower(
                 partial.clear();
                 emitted.clear();
                 historical = true;
+                last_turn_was_user = false;
             }
             if len <= last_pos && partial.is_empty() {
                 continue;
@@ -103,6 +108,8 @@ pub fn spawn_follower(
                     continue;
                 };
                 if let Some(running) = turn_state(&v) {
+                    last_turn_was_user = running
+                        && v.get("type").and_then(serde_json::Value::as_str) == Some("user");
                     let changed = {
                         let mut map = busy.lock().unwrap();
                         let prev = map.insert(conv_id.clone(), running);
@@ -131,7 +138,22 @@ pub fn spawn_follower(
             }
 
             if !live {
-                if let Some(running) = busy.lock().unwrap().get(&conv_id).copied() {
+                // A replayed turn that ends on a user prompt with no assistant
+                // reply was most likely aborted before the CLI could write an
+                // interrupt marker; don't resurrect a running spinner.
+                let (had_state, running) = {
+                    let mut map = busy.lock().unwrap();
+                    let had_state = map.contains_key(&conv_id);
+                    let running = replay_busy(
+                        map.get(&conv_id).copied().unwrap_or(false),
+                        last_turn_was_user,
+                    );
+                    if had_state {
+                        map.insert(conv_id.clone(), running);
+                    }
+                    (had_state, running)
+                };
+                if had_state {
                     let _ = app.emit(
                         "conversation-busy",
                         ConversationBusy {
@@ -179,6 +201,13 @@ fn message_texts(content: &serde_json::Value) -> Vec<&str> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Busy state to report after replaying history. A turn that ends on a user
+/// prompt has no assistant reply: it was most likely aborted before the CLI
+/// could write an interrupt marker, so do not resurrect a running spinner.
+fn replay_busy(running: bool, last_turn_was_user: bool) -> bool {
+    running && !last_turn_was_user
 }
 
 /// Whether one JSONL line says a turn is running. `None` = the line carries
@@ -312,5 +341,14 @@ mod tests {
             })),
             None
         );
+    }
+
+    #[test]
+    fn replay_does_not_revive_a_dangling_prompt() {
+        // User prompt, no assistant reply → aborted before the interrupt marker.
+        assert!(!replay_busy(true, true));
+        // Assistant streaming or waiting on a tool → genuinely running.
+        assert!(replay_busy(true, false));
+        assert!(!replay_busy(false, false));
     }
 }

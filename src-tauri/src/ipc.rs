@@ -268,14 +268,49 @@ pub async fn terminal_start(
     })
 }
 
+/// A lone Escape byte is Claude Code's interrupt key; escape sequences such as
+/// arrow keys (`\x1b[A`) are not.
+fn is_interrupt_key(text: &str) -> bool {
+    text == "\x1b"
+}
+
 #[tauri::command]
 pub fn terminal_write(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: u64,
     text: String,
     submit: bool,
 ) -> Result<(), String> {
-    with_terminal(&state, id, |t| t.write(&text, submit))
+    let handle = state
+        .terms
+        .read()
+        .unwrap()
+        .get(&id)
+        .cloned()
+        .ok_or("terminal not found")?;
+    handle.write(&text, submit)?;
+
+    // Esc is Claude Code's interrupt key. When the abort happens before the
+    // first assistant message, the transcript contains no interrupt marker,
+    // so the follower would keep the turn running forever. Clear it here; the
+    // next transcript line restores the state if the turn really continues.
+    if is_interrupt_key(&text) {
+        let was_busy = {
+            let mut map = state.busy.lock().unwrap();
+            map.insert(handle.conv_id.clone(), false)
+        };
+        if was_busy == Some(true) {
+            let _ = app.emit(
+                "conversation-busy",
+                follower::ConversationBusy {
+                    conversation_id: handle.conv_id.clone(),
+                    busy: false,
+                },
+            );
+        }
+    }
+    Ok(())
 }
 
 /// One composer turn: text plus any pasted image paths.
@@ -959,5 +994,14 @@ mod tests {
             exited: false,
         }];
         assert_eq!(pick_eviction(&terms, &all_busy, "new", now), None);
+    }
+
+    #[test]
+    fn only_a_lone_escape_is_an_interrupt() {
+        assert!(is_interrupt_key("\x1b"));
+        assert!(!is_interrupt_key("\x1b[A")); // up arrow
+        assert!(!is_interrupt_key("\x1b[200~")); // bracketed paste start
+        assert!(!is_interrupt_key("\x03")); // Ctrl-C
+        assert!(!is_interrupt_key(""));
     }
 }
