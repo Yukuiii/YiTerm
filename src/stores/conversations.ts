@@ -1,10 +1,5 @@
 import { create } from 'zustand';
-import {
-  conversationsCreate,
-  conversationsDelete,
-  conversationsList,
-  type Conversation,
-} from '../ipc';
+import { conversationsCreate, conversationsList, type Conversation } from '../ipc';
 
 interface ConversationsStore {
   list: Conversation[];
@@ -16,12 +11,11 @@ interface ConversationsStore {
   /** Re-reads Claude's records; used to pick up sessions created outside. */
   refresh: () => Promise<void>;
   create: (folder: string) => Promise<Conversation>;
-  remove: (id: string) => Promise<void>;
   setActive: (id: string | null) => void;
 }
 
 // Invalidates in-flight refreshes when the list is mutated or a newer refresh
-// starts, so a slow scan can never resurrect a deleted row or drop a new one.
+// starts, so a slow scan can never undo a newer list.
 let refreshTick = 0;
 
 export const useConversationsStore = create<ConversationsStore>((set, get) => ({
@@ -75,16 +69,6 @@ export const useConversationsStore = create<ConversationsStore>((set, get) => ({
     refreshTick++;
     set((s) => ({ list: [conv, ...s.list], activeId: conv.id }));
     return conv;
-  },
-
-  remove: async (id) => {
-    await conversationsDelete(id);
-    refreshTick++;
-    set((s) => {
-      const list = s.list.filter((c) => c.id !== id);
-      const activeId = s.activeId === id ? (list[0]?.id ?? null) : s.activeId;
-      return { list, activeId };
-    });
   },
 
   setActive: (id) => set({ activeId: id }),

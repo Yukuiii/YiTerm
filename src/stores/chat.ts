@@ -107,7 +107,6 @@ interface ChatStore {
   ) => void;
   setError: (convId: string, key: string, message: string) => void;
   setWorking: (convId: string, key: string, working: boolean) => void;
-  clearConv: (convId: string) => void;
   /** 立即翻译一条消息（assistant en→zh） */
   translateNow: (convId: string, key: string) => Promise<void>;
   /** 发送方向的翻译（zh→en），返回最终英文 */
@@ -451,13 +450,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setWorking: (convId, key, working) =>
     set((s) => ({ byConv: updateMsg(s.byConv, convId, key, (m) => ({ ...m, working })) })),
-
-  clearConv: (convId) =>
-    set((s) => {
-      const byConv = { ...s.byConv };
-      delete byConv[convId];
-      return { byConv };
-    }),
 
   translateNow: async (convId, key) => {
     const id = `${convId}:${key}`;

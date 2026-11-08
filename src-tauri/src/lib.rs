@@ -29,7 +29,6 @@ pub fn run() {
             ipc::terminal_kill,
             ipc::conversations_list,
             ipc::conversations_create,
-            ipc::conversations_delete,
             ipc::chat_save,
             ipc::chat_load,
             ipc::chat_image_save,

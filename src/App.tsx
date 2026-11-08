@@ -9,14 +9,7 @@ import {
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { appConfigDir, appLogDir } from '@tauri-apps/api/path';
-import {
-  currentUser,
-  debugLog,
-  onConversationBusy,
-  onSessionUpdate,
-  terminalKill,
-  type Conversation,
-} from './ipc';
+import { currentUser, debugLog, onConversationBusy, onSessionUpdate } from './ipc';
 import { useChatStore } from './stores/chat';
 import { useConversationsStore } from './stores/conversations';
 import { useSettingsStore } from './stores/settings';
@@ -38,7 +31,6 @@ export default function App() {
   const projects = useConversationsStore((s) => s.projects);
   const loadConvs = useConversationsStore((s) => s.load);
   const createConv = useConversationsStore((s) => s.create);
-  const removeConv = useConversationsStore((s) => s.remove);
   const setActive = useConversationsStore((s) => s.setActive);
   const settings = useSettingsStore((s) => s.settings);
   const loadSettings = useSettingsStore((s) => s.load);
@@ -206,14 +198,6 @@ export default function App() {
     void createConv(folder).catch((e) => console.error('create conversation failed:', e));
   };
 
-  const handleDelete = (conv: Conversation) => {
-    const term = useTerminalsStore.getState().byConv[conv.id];
-    if (term) void terminalKill(term.terminalId);
-    useTerminalsStore.getState().drop(conv.id);
-    useChatStore.getState().clearConv(conv.id);
-    void removeConv(conv.id).catch((e) => console.error('delete conversation failed:', e));
-  };
-
   const handlePickNewFolder = () => {
     void pickFolder().then((folder) => {
       if (folder) setNewFolder(folder);
@@ -271,7 +255,6 @@ export default function App() {
           onOpenSettings={() => setSettingsOpen(true)}
           onCreateInFolder={handleCreateInFolder}
           onSelect={setActive}
-          onDelete={handleDelete}
           onRevealConfig={handleRevealConfigDir}
           onRevealLogs={handleRevealLogsDir}
         />

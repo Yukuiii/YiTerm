@@ -468,45 +468,6 @@ pub fn conversations_create(
     Ok(conv)
 }
 
-#[tauri::command]
-pub fn conversations_delete(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<(), String> {
-    let conv = state.convs.write().unwrap().remove(&id);
-    if let Some(conv) = &conv {
-        if let Some(tid) = conv.terminal_id {
-            if let Some(t) = state.terms.read().unwrap().get(&tid) {
-                t.kill();
-            }
-            state.terms.write().unwrap().remove(&tid);
-        }
-    }
-    if let Some(handle) = state.followers.lock().unwrap().remove(&id) {
-        handle.abort();
-    }
-    state.busy.lock().unwrap().remove(&id);
-    let _ = app.emit(
-        "conversation-busy",
-        follower::ConversationBusy {
-            conversation_id: id.clone(),
-            busy: false,
-        },
-    );
-    // Pasted screenshots are conversation-scoped; don't leave them in the cache.
-    if valid_conv_id(&id) {
-        let images = images_dir(&state, &app, &id);
-        if let Err(e) = std::fs::remove_dir_all(&images)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(target: "yiterm", conv = %id, "cleanup images: {e}");
-        }
-    }
-    state.persist_conversations(&app);
-    Ok(())
-}
-
 /// Frontend diagnostic breadcrumbs → backend log (helps debug IPC/state issues
 /// without devtools attached to the webview).
 #[tauri::command]

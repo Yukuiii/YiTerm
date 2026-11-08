@@ -14,7 +14,6 @@ import {
   SearchIcon,
   SlidersIcon,
   SpinnerIcon,
-  XIcon,
 } from './Icons';
 
 interface SidebarProps {
@@ -30,7 +29,6 @@ interface SidebarProps {
   onOpenSettings: () => void;
   onCreateInFolder: (folder: string) => void;
   onSelect: (id: string) => void;
-  onDelete: (conv: Conversation) => void;
   onRevealConfig: () => void;
   onRevealLogs: () => void;
 }
@@ -47,7 +45,6 @@ export default function Sidebar({
   onOpenSettings,
   onCreateInFolder,
   onSelect,
-  onDelete,
   onRevealConfig,
   onRevealLogs,
 }: SidebarProps) {
@@ -218,7 +215,7 @@ export default function Sidebar({
                     {g.convs.map(({ conv, label }) => (
                       <div
                         key={conv.id}
-                        className={`session-row ${conv.id === activeId ? 'active' : ''} ${!conv.imported ? 'has-del' : ''}`}
+                        className={`session-row ${conv.id === activeId ? 'active' : ''}`}
                         role="button"
                         tabIndex={0}
                         title={conv.folder}
@@ -236,18 +233,6 @@ export default function Sidebar({
                           </span>
                         )}
                         <span className="session-title">{label}</span>
-                        {!conv.imported && (
-                          <button
-                            className="session-del"
-                            title="删除会话"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onDelete(conv);
-                            }}
-                          >
-                            <XIcon size={13} />
-                          </button>
-                        )}
                       </div>
                     ))}
                   </div>

@@ -348,30 +348,6 @@ button, input, textarea { font-family: inherit; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Reserve room for the hover-only delete button (absolutely positioned so
-   showing it never changes the row height). */
-.session-row.has-del .session-title { padding-right: 22px; }
-
-.session-del {
-  position: absolute;
-  top: 50%;
-  right: 4px;
-  transform: translateY(-50%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  visibility: hidden;
-  background: none;
-  border: 0;
-  border-radius: 5px;
-  color: var(--fg-faint);
-  cursor: pointer;
-}
-.session-row:hover .session-del { visibility: visible; }
-.session-del:hover { background: #333; color: var(--danger); }
 
 .side-empty {
   margin-top: 26px;

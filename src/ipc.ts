@@ -129,9 +129,6 @@ export const conversationsList = () => invoke<ConversationsOverview>('conversati
 export const conversationsCreate = (folder: string, title?: string) =>
   invoke<Conversation>('conversations_create', { folder, title: title ?? null });
 
-export const conversationsDelete = (id: string) =>
-  invoke<void>('conversations_delete', { id });
-
 // ---------- diagnostics ----------
 
 export const debugLog = (message: string) =>
