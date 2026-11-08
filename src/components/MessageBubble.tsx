@@ -7,6 +7,20 @@ import { ChevronIcon, CodeIcon, FileIcon, SparkleIcon, TerminalIcon } from './Ic
 
 const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
 
+/** One-line verb for tool steps whose label is a bare path/pattern/url. */
+const TOOL_ACTION: Record<string, string> = {
+  Read: '读取',
+  Write: '写入',
+  Edit: '编辑',
+  MultiEdit: '编辑',
+  NotebookEdit: '编辑',
+  Grep: '搜索',
+  Glob: '查找',
+  WebFetch: '抓取',
+  WebSearch: '搜索',
+  Task: '子任务',
+};
+
 /**
  * Thumbnails for pasted screenshots. They live in the app cache, which the OS
  * may purge, so a path that no longer resolves is simply hidden.
@@ -80,11 +94,15 @@ export default function MessageBubble({
             {msg.toolCalls.map((t) => {
               const StepIcon = t.name === 'Bash' ? TerminalIcon : CodeIcon;
               const label = t.label || t.detail || t.name;
+              const action = label === t.name ? undefined : TOOL_ACTION[t.name];
               return (
                 <details key={t.id} className={`step-item ${t.isError ? 'is-error' : ''}`}>
                   <summary>
                     <span className="step-icon"><StepIcon size={14} /></span>
-                    <span className="step-label" title={t.detail || t.name}>{label}</span>
+                    <span className="step-label" title={t.detail || t.name}>
+                      {action && <span className="step-action">{action}</span>}
+                      {label}
+                    </span>
                     {t.result !== undefined && (
                       <span className="step-status">{t.isError ? '失败' : '✓'}</span>
                     )}

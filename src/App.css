@@ -729,6 +729,11 @@ button, input, textarea { font-family: inherit; }
   white-space: nowrap;
 }
 
+.step-action {
+  margin-right: 5px;
+  color: #8f8f8f;
+}
+
 .step-status { flex: none; font-size: 10.5px; color: var(--ok); }
 .step-item.is-error .step-status { color: var(--danger); }
 
