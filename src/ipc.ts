@@ -296,6 +296,42 @@ export function onConversationInterrupted(
   return listen<ConversationInterrupted>('conversation-interrupted', (e) => cb(e.payload));
 }
 
+// ---------- updates ----------
+
+export interface UpdateInfo {
+  currentVersion: string;
+  latestVersion: string;
+  name: string;
+  notes: string;
+  assetName: string;
+  assetUrl: string;
+  publishedAt: string | null;
+}
+
+export type UpdateProgress =
+  | { type: 'progress'; downloaded: number; total: number }
+  | { type: 'done'; path: string }
+  | { type: 'error'; message: string };
+
+export const updateCheck = () => invoke<UpdateInfo | null>('update_check');
+
+export function updateDownload(
+  url: string,
+  onProgress: (p: UpdateProgress) => void,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const channel = new Channel<UpdateProgress>();
+    channel.onmessage = (p) => {
+      onProgress(p);
+      if (p.type === 'done') resolve();
+      else if (p.type === 'error') reject(new Error(p.message));
+    };
+    invoke<void>('update_download', { url, channel }).catch((e) => reject(e));
+  });
+}
+
+export const updateInstall = () => invoke<void>('update_install');
+
 // ---------- misc ----------
 
 export function hasCJK(text: string): boolean {

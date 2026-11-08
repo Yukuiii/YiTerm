@@ -15,6 +15,8 @@ import {
   onConversationBusy,
   onConversationInterrupted,
   onSessionUpdate,
+  updateCheck,
+  type UpdateInfo,
 } from './ipc';
 import { useChatStore } from './stores/chat';
 import { useConversationsStore } from './stores/conversations';
@@ -28,6 +30,7 @@ import NewSessionView from './components/NewSessionView';
 import ChatPanel from './components/ChatPanel';
 import TerminalPanel from './components/TerminalPanel';
 import SettingsPage from './components/SettingsPage';
+import UpdateDialog from './components/UpdateDialog';
 import { FolderIcon, TerminalIcon } from './components/Icons';
 import './App.css';
 
@@ -51,6 +54,7 @@ export default function App() {
     return saved === 'work' || saved === 'code' ? saved : 'code';
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [newFolder, setNewFolder] = useState<string | null>(null);
   const [userName, setUserName] = useState('user');
 
@@ -84,6 +88,19 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('yiterm.viewMode', viewMode);
   }, [viewMode]);
+
+  // Check GitHub for a newer release shortly after launch. Failures are
+  // silent: a missing network or a rate-limited API must not disturb startup.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void updateCheck()
+        .then((info) => {
+          if (info) setUpdateInfo(info);
+        })
+        .catch(() => {});
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   // Claude Code can start sessions outside YiTerm (CLI, another window).
   // Re-scan while visible and whenever the window regains focus.
@@ -361,6 +378,9 @@ export default function App() {
       </main>
 
       {settingsOpen && <SettingsPage onClose={() => setSettingsOpen(false)} />}
+      {updateInfo && (
+        <UpdateDialog info={updateInfo} onClose={() => setUpdateInfo(null)} />
+      )}
     </div>
   );
 }

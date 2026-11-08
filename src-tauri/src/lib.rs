@@ -4,6 +4,7 @@ mod settings;
 mod state;
 mod terminal;
 mod translate;
+mod update;
 
 use std::sync::OnceLock;
 
@@ -44,6 +45,9 @@ pub fn run() {
             ipc::model_status,
             ipc::model_download,
             ipc::model_delete,
+            update::update_check,
+            update::update_download,
+            update::update_install,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
