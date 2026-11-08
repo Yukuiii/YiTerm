@@ -38,7 +38,6 @@ export default function MessageBubble({
   onRetry: () => void;
   onSendAsIs: () => void;
 }) {
-  const [showOriginal, setShowOriginal] = useState(false);
   const isUser = msg.role === 'user';
 
   // Claude Code stores pasted images as a `[Image #N]` marker inside the
@@ -48,9 +47,6 @@ export default function MessageBubble({
   // Primary display: user → 中文原文; assistant → 中文译文（无译文时显示英文原文）
   const primary = isUser ? userText : (msg.translation ?? msg.original);
   const secondary = isUser ? msg.translation : msg.original;
-  // A translation that equals the source (e.g. assistant already wrote Chinese)
-  // has no useful original toggle.
-  const hasDistinctOriginal = !isUser && !!msg.translation && msg.translation !== msg.original;
   const thinking = msg.thinking?.trim() ?? '';
   // Empty body: an image turn already shows its thumbnails above; a restored
   // image turn (paths are not persisted) says so without the dead thumbnail;
@@ -124,16 +120,6 @@ export default function MessageBubble({
         )}
         {isUser && secondary && secondary !== msg.original && !msg.error && (
           <div className="bubble-secondary" title="英文译文">{secondary}</div>
-        )}
-        {hasDistinctOriginal && !msg.error && (
-          <button className="toggle-original" onClick={() => setShowOriginal(!showOriginal)}>
-            {showOriginal ? '隐藏原文' : '显示原文'}
-          </button>
-        )}
-        {!isUser && showOriginal && (
-          <div className="bubble-secondary">
-            <Markdown>{msg.original}</Markdown>
-          </div>
         )}
       </div>
     </div>
