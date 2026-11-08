@@ -167,6 +167,20 @@ pub fn spawn_follower(
     })
 }
 
+/// Text fragments of a user message: a plain string counts as one fragment,
+/// an array contributes the `text` of its content blocks, and anything else
+/// contributes none. Claude Code writes interrupt markers both ways.
+fn message_texts(content: &serde_json::Value) -> Vec<&str> {
+    match content {
+        serde_json::Value::String(s) => vec![s.as_str()],
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| b.get("text").and_then(serde_json::Value::as_str))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Whether one JSONL line says a turn is running. `None` = the line carries
 /// no turn state (tool results, meta/system noise).
 ///
@@ -193,10 +207,10 @@ fn turn_state(v: &serde_json::Value) -> Option<bool> {
                 return None;
             }
             let content = v.pointer("/message/content")?;
-            // Pressing Esc writes this marker instead of an assistant
-            // `end_turn`, so it must close the running turn.
-            if let Some(text) = content.as_str() {
+            for text in message_texts(content) {
                 let text = text.trim_start();
+                // Pressing Esc writes this marker instead of an assistant
+                // `end_turn`, so it must close the running turn.
                 if text.starts_with("[Request interrupted by user") {
                     return Some(false);
                 }
@@ -267,11 +281,19 @@ mod tests {
         );
         // Unrelated line types are ignored.
         assert_eq!(turn_state(&json!({"type":"system"})), None);
-        // Interrupting a turn closes it without an assistant end_turn.
+        // Interrupting a turn closes it without an assistant end_turn; the
+        // marker can arrive as a string or as an array of text blocks.
         assert_eq!(
             turn_state(&json!({
                 "type":"user",
                 "message":{"content":"[Request interrupted by user]"}
+            })),
+            Some(false)
+        );
+        assert_eq!(
+            turn_state(&json!({
+                "type":"user",
+                "message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}
             })),
             Some(false)
         );

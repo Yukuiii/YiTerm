@@ -54,6 +54,10 @@ export default function ChatPanel({ convId }: { convId: string }) {
   // a floating button offers the jump instead.
   const atBottomRef = useRef(true);
   const [atBottom, setAtBottom] = useState(true);
+  // The first content after a conversation switch is scrolled instantly; a
+  // smooth animation racing the swapped content can leave the pane unpainted
+  // in WKWebView until the next wheel scroll.
+  const justSwitchedRef = useRef(false);
 
   const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
     const el = messagesRef.current;
@@ -89,20 +93,28 @@ export default function ChatPanel({ convId }: { convId: string }) {
     void useChatStore.getState().hydrate(convId);
   }, [convId]);
 
+  // Conversation switch: start at the newest message. Declared before the
+  // update effect so the first scroll never starts a smooth animation that
+  // races the swapped content.
+  useEffect(() => {
+    justSwitchedRef.current = true;
+    // `scrollToBottom` also parks the list at the bottom.
+    scrollToBottom();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [convId]);
+
   const lastMsg = msgs[msgs.length - 1];
   useEffect(() => {
     // Scroll only the message list. `scrollIntoView` also scrolls the document
     // (including horizontally), which could shift the sidebar out of view.
     // Skip while the user is reading history further up.
-    if (atBottomRef.current) scrollToBottom('smooth');
+    if (!atBottomRef.current) return;
+    // After a switch, wait for the conversation's first messages
+    // (hydration/replay) so the whole initial jump stays instant.
+    if (justSwitchedRef.current && msgs.length === 0) return;
+    scrollToBottom(justSwitchedRef.current ? 'auto' : 'smooth');
+    justSwitchedRef.current = false;
   }, [msgs.length, lastMsg?.translation, lastMsg?.original]);
-
-  // Conversation switch: start at the newest message.
-  useEffect(() => {
-    atBottomRef.current = true;
-    scrollToBottom();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [convId]);
 
   /** Persists clipboard images and adds a removable chip for each. */
   const addPastedImages = async (picked: File[]) => {
