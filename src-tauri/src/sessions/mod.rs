@@ -67,6 +67,10 @@ pub struct ChatMsg {
     pub tool_result: Option<ToolResult>,
     pub ts: Option<String>,
     pub done: bool,
+    /// The prompt was sent but the turn was interrupted before any assistant
+    /// reply.
+    #[serde(default)]
+    pub interrupted: bool,
 }
 
 const TOOL_DETAIL_MAX: usize = 200;
@@ -180,6 +184,27 @@ const SKIP_USER_PREFIXES: [&str; 6] = [
     "<task-summary>",
 ];
 
+/// The user line Claude Code writes when a running turn is interrupted.
+pub(crate) fn is_interrupt_marker(text: &str) -> bool {
+    text.trim_start().starts_with("[Request interrupted by user")
+}
+
+/// Claude Code's local placeholder for a request that ended without any API
+/// response (e.g. interrupted before the first token). It is not a real
+/// assistant turn.
+pub(crate) fn is_synthetic_no_response(message: &Value) -> bool {
+    message.get("model").and_then(Value::as_str) == Some("<synthetic>")
+        && message
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| {
+                blocks.len() == 1
+                    && blocks[0].get("type").and_then(Value::as_str) == Some("text")
+                    && blocks[0].get("text").and_then(Value::as_str)
+                        == Some("No response requested.")
+            })
+}
+
 /// Tolerant extraction from one JSONL line. Returns zero or more displayable
 /// chat messages (a user line can carry several tool_result blocks). Unknown
 /// line types are ignored silently.
@@ -236,6 +261,7 @@ pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
                         }),
                         ts: ts.clone(),
                         done: true,
+                        interrupted: false,
                     });
                 }
                 if !out.is_empty() {
@@ -269,7 +295,9 @@ pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
                 let Some(key) = v.get("uuid").and_then(Value::as_str) else {
                     return Vec::new();
                 };
-                if SKIP_USER_PREFIXES.iter().any(|p| text.starts_with(p)) {
+                if is_interrupt_marker(&text)
+                    || SKIP_USER_PREFIXES.iter().any(|p| text.starts_with(p))
+                {
                     return Vec::new();
                 }
                 return vec![ChatMsg {
@@ -281,6 +309,7 @@ pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
                     tool_result: None,
                     ts,
                     done: true,
+                    interrupted: false,
                 }];
             }
             // String content = a real prompt.
@@ -288,7 +317,10 @@ pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
                 return Vec::new();
             };
             let text = raw.trim();
-            if text.is_empty() || SKIP_USER_PREFIXES.iter().any(|p| text.starts_with(p)) {
+            if text.is_empty()
+                || is_interrupt_marker(text)
+                || SKIP_USER_PREFIXES.iter().any(|p| text.starts_with(p))
+            {
                 return Vec::new();
             }
             let Some(key) = v.get("uuid").and_then(Value::as_str) else {
@@ -303,6 +335,7 @@ pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
                 tool_result: None,
                 ts,
                 done: true,
+                interrupted: false,
             }]
         }
         "assistant" => {
@@ -312,17 +345,7 @@ pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
             // Claude Code synthesizes this placeholder locally when a request
             // is aborted or queued without an API response; its own UI hides
             // it, so the mirror should not show "无需回复。".
-            if message.get("model").and_then(Value::as_str) == Some("<synthetic>")
-                && message
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .is_some_and(|blocks| {
-                        blocks.len() == 1
-                            && blocks[0].get("type").and_then(Value::as_str) == Some("text")
-                            && blocks[0].get("text").and_then(Value::as_str)
-                                == Some("No response requested.")
-                    })
-            {
+            if is_synthetic_no_response(message) {
                 return Vec::new();
             }
             let Some(key) = message
@@ -387,6 +410,7 @@ pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
                 tool_result: None,
                 ts,
                 done,
+                interrupted: false,
             }]
         }
         _ => Vec::new(), // system / mode / api-request / attachment / ... — ignored
@@ -632,6 +656,17 @@ mod tests {
         for t in ["system", "mode", "permission-mode", "api-request", "file-history-snapshot"] {
             let v = json!({ "type": t, "message": { "role": "user", "content": "x" } });
             assert!(parse_line(&v).is_empty(), "{t} should be ignored");
+        }
+    }
+
+    #[test]
+    fn ignores_interrupt_markers() {
+        for content in [
+            json!("[Request interrupted by user]"),
+            json!([{ "type": "text", "text": "[Request interrupted by user for tool use]" }]),
+        ] {
+            let v = json!({ "type": "user", "message": { "content": content } });
+            assert!(parse_line(&v).is_empty(), "interrupt marker surfaced");
         }
     }
 

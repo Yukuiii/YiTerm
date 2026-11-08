@@ -9,7 +9,13 @@ import {
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { appConfigDir, appLogDir } from '@tauri-apps/api/path';
-import { currentUser, debugLog, onConversationBusy, onSessionUpdate } from './ipc';
+import {
+  currentUser,
+  debugLog,
+  onConversationBusy,
+  onConversationInterrupted,
+  onSessionUpdate,
+} from './ipc';
 import { useChatStore } from './stores/chat';
 import { useConversationsStore } from './stores/conversations';
 import { useSettingsStore } from './stores/settings';
@@ -64,9 +70,14 @@ export default function App() {
     const unBusy = onConversationBusy((p) => {
       useTerminalsStore.getState().setBusy(p.conversationId, p.busy);
     });
+    // Esc aborted the turn before a reply: tag the pending prompt.
+    const unInterrupted = onConversationInterrupted((p) => {
+      useChatStore.getState().markLastPromptInterrupted(p.conversationId);
+    });
     return () => {
       void un.then((f) => f());
       void unBusy.then((f) => f());
+      void unInterrupted.then((f) => f());
     };
   }, [loadConvs, loadSettings]);
 

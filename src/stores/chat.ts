@@ -71,6 +71,8 @@ export interface Msg {
    * reads the files by path.
    */
   files?: string[];
+  /** The prompt was sent but interrupted before any assistant reply. */
+  interrupted?: boolean;
 }
 
 /**
@@ -107,6 +109,8 @@ interface ChatStore {
   ) => void;
   setError: (convId: string, key: string, message: string) => void;
   setWorking: (convId: string, key: string, working: boolean) => void;
+  /** Esc aborted the pending turn: tag its user bubble as interrupted. */
+  markLastPromptInterrupted: (convId: string) => void;
   /** 立即翻译一条消息（assistant en→zh） */
   translateNow: (convId: string, key: string) => Promise<void>;
   /** 发送方向的翻译（zh→en），返回最终英文 */
@@ -317,9 +321,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         // string-content turn. Strip our own image paths (and any `[Image #N]`
         // marker) so it reconciles instead of becoming a second bubble whose
         // body is a filesystem path.
-        const match = list.find((x) => {
+        const textMatches = (x: Msg) => {
           if (x.role !== 'user') return false;
-          if (x.sessionKey === m.key) return true;
           if (x.sentText === trimmed || x.translation === trimmed || x.original.trim() === trimmed) {
             return true;
           }
@@ -328,14 +331,35 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           for (const p of x.images) rest = rest.split(p).join(' ');
           rest = rest.replace(/\[(?:Image|Pasted text) #\d+(?: \+\d+ lines)?\]/g, '').trim();
           return rest !== trimmed && (x.sentText === rest || x.original.trim() === rest);
-        });
+        };
+        const bySession = list.find((x) => x.role === 'user' && x.sessionKey === m.key);
+        // An interrupt update must land on the exact transcript message. If it
+        // has not been reconciled yet, only consider bubbles with no session
+        // key so an older duplicate carrying the same text is not marked.
+        const match =
+          bySession ??
+          (m.interrupted
+            ? list.find((x) => x.role === 'user' && !x.sessionKey && textMatches(x))
+            : list.find(textMatches));
         if (match) {
           set((s) => ({ byConv: updateMsg(s.byConv, convId, match.key, (prev) => ({
-            ...prev, sessionKey: m.key, ts: prev.ts ?? m.ts,
+            ...prev,
+            sessionKey: m.key,
+            ts: prev.ts ?? m.ts,
+            ...(m.interrupted ? { interrupted: true } : {}),
           })) }));
           continue;
         }
-        if (list.some((x) => x.key === m.key)) continue; // already known
+        if (list.some((x) => x.key === m.key)) {
+          if (m.interrupted) {
+            set((s) => ({
+              byConv: updateMsg(s.byConv, convId, m.key, (prev) => ({
+                ...prev, interrupted: true,
+              })),
+            }));
+          }
+          continue; // already known
+        }
         // Rebuilding a turn we have no optimistic bubble for (e.g. an image
         // turn restored from the transcript, or one typed in the terminal).
         // Strip Claude Code's `[Image #N]` marker: the thumbnail itself is not
@@ -350,6 +374,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               working: false, error: null, ts: m.ts, thinking: null, toolCalls: [],
               fromTerminal: true, sessionKey: m.key,
               hadImages: hadImages || undefined,
+              interrupted: m.interrupted || undefined,
             } satisfies Msg],
           },
         }));
@@ -357,6 +382,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       // assistant: upsert by key.
+      // A later assistant line means the turn was not actually interrupted.
+      const pendingUser = [...list].reverse().find((x) => x.role === 'user');
+      if (
+        pendingUser?.interrupted &&
+        pendingUser.ts &&
+        m.ts &&
+        Date.parse(m.ts) > Date.parse(pendingUser.ts)
+      ) {
+        set((s) => ({
+          byConv: updateMsg(s.byConv, convId, pendingUser.key, (prev) => ({
+            ...prev, interrupted: false,
+          })),
+        }));
+      }
       // A message id can arrive as several block-scoped lines (thinking / text /
       // tool_use) — never let an empty-text line wipe text we already have.
       const existing = list.find((x) => x.key === m.key);
@@ -450,6 +489,26 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setWorking: (convId, key, working) =>
     set((s) => ({ byConv: updateMsg(s.byConv, convId, key, (m) => ({ ...m, working })) })),
+
+  markLastPromptInterrupted: (convId) =>
+    set((s) => {
+      const list = s.byConv[convId] ?? [];
+      // Only the latest prompt can be pending; an assistant message after it
+      // means Esc interrupted a reply that had already started streaming.
+      for (let i = list.length - 1; i >= 0; i--) {
+        const m = list[i];
+        if (m.role === 'assistant') return {};
+        if (m.role === 'user') {
+          if (m.interrupted) return {};
+          return {
+            byConv: updateMsg(s.byConv, convId, m.key, (prev) => ({
+              ...prev, interrupted: true,
+            })),
+          };
+        }
+      }
+      return {};
+    }),
 
   translateNow: async (convId, key) => {
     const id = `${convId}:${key}`;

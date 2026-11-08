@@ -67,6 +67,8 @@ export interface ChatMsg {
   toolResult: ToolResult | null;
   ts: string | null;
   done: boolean;
+  /** The prompt was interrupted before any assistant reply. */
+  interrupted?: boolean;
 }
 
 export interface SessionUpdate {
@@ -256,6 +258,17 @@ export interface ConversationBusy {
 
 export function onConversationBusy(cb: (p: ConversationBusy) => void): Promise<UnlistenFn> {
   return listen<ConversationBusy>('conversation-busy', (e) => cb(e.payload));
+}
+
+/** Esc aborted a running turn before any assistant reply. */
+export interface ConversationInterrupted {
+  conversationId: string;
+}
+
+export function onConversationInterrupted(
+  cb: (p: ConversationInterrupted) => void,
+): Promise<UnlistenFn> {
+  return listen<ConversationInterrupted>('conversation-interrupted', (e) => cb(e.payload));
 }
 
 // ---------- misc ----------

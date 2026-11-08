@@ -3,7 +3,9 @@ use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex}};
 use serde::Serialize;
 use tauri::Emitter;
 
-use super::{parse_line, ChatMsg, SKIP_USER_PREFIXES};
+use super::{
+    is_interrupt_marker, is_synthetic_no_response, parse_line, ChatMsg, Role, SKIP_USER_PREFIXES,
+};
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
 
@@ -62,6 +64,11 @@ pub fn spawn_follower(
         // that ends on one has no assistant reply, usually because the request
         // was aborted before the CLI could write an interrupt marker.
         let mut last_turn_was_user = false;
+        // The last user prompt, kept so an interrupt that arrives before any
+        // assistant reply can mark that bubble as interrupted.
+        let mut last_user: Option<ChatMsg> = None;
+        let mut assistant_since_prompt = false;
+        let mut marked_interrupted = false;
 
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -78,6 +85,9 @@ pub fn spawn_follower(
                 emitted.clear();
                 historical = true;
                 last_turn_was_user = false;
+                last_user = None;
+                assistant_since_prompt = false;
+                marked_interrupted = false;
             }
             if len <= last_pos && partial.is_empty() {
                 continue;
@@ -107,7 +117,50 @@ pub fn spawn_follower(
                     tracing::debug!(?path, "unparseable jsonl line skipped");
                     continue;
                 };
-                if let Some(running) = turn_state(&v) {
+                let state = turn_state(&v);
+                let parsed = parse_line(&v);
+                let is_user_prompt = state == Some(true)
+                    && v.get("type").and_then(serde_json::Value::as_str) == Some("user");
+                if is_user_prompt {
+                    match parsed.iter().find(|m| m.role == Role::User) {
+                        Some(msg) => {
+                            last_user = Some(msg.clone());
+                            assistant_since_prompt = false;
+                            marked_interrupted = false;
+                        }
+                        None => {
+                            last_user = None;
+                            assistant_since_prompt = false;
+                            marked_interrupted = false;
+                        }
+                    }
+                } else if v.get("type").and_then(serde_json::Value::as_str) == Some("assistant")
+                    && v.get("isSidechain").and_then(serde_json::Value::as_bool) != Some(true)
+                    && !v.get("message").is_some_and(is_synthetic_no_response)
+                {
+                    assistant_since_prompt = true;
+                }
+
+                // An interrupt before any assistant line leaves no reply: mark
+                // the prompt so the chat can say "已中断" instead of showing a
+                // silently dangling user bubble.
+                if !marked_interrupted
+                    && !assistant_since_prompt
+                    && (has_interrupt_marker(&v)
+                        || v.get("message").is_some_and(is_synthetic_no_response))
+                {
+                    if let Some(mut msg) = last_user.clone() {
+                        msg.interrupted = true;
+                        let fingerprint = serde_json::to_string(&msg).unwrap_or_default();
+                        if emitted.get(&msg.key) != Some(&fingerprint) {
+                            emitted.insert(msg.key.clone(), fingerprint);
+                            upserts.push(msg);
+                        }
+                        marked_interrupted = true;
+                    }
+                }
+
+                if let Some(running) = state {
                     last_turn_was_user = running
                         && v.get("type").and_then(serde_json::Value::as_str) == Some("user");
                     let changed = {
@@ -125,7 +178,7 @@ pub fn spawn_follower(
                         );
                     }
                 }
-                for msg in parse_line(&v) {
+                for msg in parsed {
                     let fingerprint = serde_json::to_string(&msg).unwrap_or_default();
                     match emitted.get(&msg.key) {
                         Some(prev) if *prev == fingerprint => {}
@@ -203,6 +256,13 @@ fn message_texts(content: &serde_json::Value) -> Vec<&str> {
     }
 }
 
+/// True when the line is Claude Code's interrupt marker for the turn.
+fn has_interrupt_marker(v: &serde_json::Value) -> bool {
+    v.get("type").and_then(serde_json::Value::as_str) == Some("user")
+        && v.pointer("/message/content")
+            .is_some_and(|content| message_texts(content).iter().any(|t| is_interrupt_marker(t)))
+}
+
 /// Busy state to report after replaying history. A turn that ends on a user
 /// prompt has no assistant reply: it was most likely aborted before the CLI
 /// could write an interrupt marker, so do not resurrect a running spinner.
@@ -240,7 +300,7 @@ fn turn_state(v: &serde_json::Value) -> Option<bool> {
                 let text = text.trim_start();
                 // Pressing Esc writes this marker instead of an assistant
                 // `end_turn`, so it must close the running turn.
-                if text.starts_with("[Request interrupted by user") {
+                if is_interrupt_marker(text) {
                     return Some(false);
                 }
                 // Slash-command machinery (/list-agents, /model, …) is a

@@ -152,6 +152,13 @@ export default function MessageBubble({
         {isUser && secondary && secondary !== msg.original && !msg.error && (
           <div className="bubble-secondary" title="英文译文">{secondary}</div>
         )}
+        {isUser && msg.interrupted && (
+          <div className="bubble-interrupted-row">
+            <span className="bubble-interrupted" title="发送后未收到回复即被中断">
+              已中断
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );

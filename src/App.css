@@ -674,6 +674,16 @@ button, input, textarea { font-family: inherit; }
 
 .bubble-working { margin-top: 5px; font-size: 11px; color: var(--fg-faint); }
 
+.bubble-interrupted-row { margin-top: 7px; text-align: right; }
+.bubble-interrupted {
+  display: inline-block;
+  padding: 1px 8px;
+  font-size: 10.5px;
+  color: var(--fg-muted);
+  border: 1px solid #3a3a3a;
+  border-radius: 999px;
+}
+
 .bubble-error { margin-top: 6px; }
 .err-text { font-size: 11.5px; color: var(--danger); word-break: break-all; }
 .err-actions { display: flex; gap: 8px; margin-top: 6px; }

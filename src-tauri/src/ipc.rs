@@ -274,6 +274,14 @@ fn is_interrupt_key(text: &str) -> bool {
     text == "\x1b"
 }
 
+/// Emitted when Esc aborts a turn, so the chat can mark the prompt that never
+/// received a reply.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConversationInterrupted {
+    conversation_id: String,
+}
+
 #[tauri::command]
 pub fn terminal_write(
     app: tauri::AppHandle,
@@ -309,6 +317,15 @@ pub fn terminal_write(
                 },
             );
         }
+        // Emit even when the busy flag has not caught up yet (Esc can be
+        // pressed within the follower's 300 ms poll); the chat only marks a
+        // trailing user bubble that has no assistant reply after it.
+        let _ = app.emit(
+            "conversation-interrupted",
+            ConversationInterrupted {
+                conversation_id: handle.conv_id.clone(),
+            },
+        );
     }
     Ok(())
 }
