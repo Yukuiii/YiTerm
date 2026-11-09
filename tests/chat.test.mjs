@@ -12,9 +12,15 @@ const source = stripTypeScriptTypes(
 
 // Exercise the real store with isolated module state, controlled timers and
 // mocked desktop IPC. No webview or additional test dependencies are needed.
-async function setup({ save = async () => {} } = {}) {
+async function setup({
+  save = async () => {},
+  load = async () => null,
+  translate = async () => { throw new Error('Unexpected translation'); },
+  mode = null,
+} = {}) {
   const timers = new Map();
   const writes = [];
+  const translations = [];
   const serializations = [];
   let nextTimer = 0;
   const context = createContext({
@@ -41,17 +47,20 @@ async function setup({ save = async () => {} } = {}) {
   const exportsByModule = {
     zustand: { create },
     '../ipc': {
-      chatLoad: async () => null,
+      chatLoad: load,
       chatSave: (convId, json) => {
         writes.push({ convId, json });
         return save(convId, json);
       },
       debugLog: async () => {},
       hasCJK: () => false,
-      translate: async () => { throw new Error('Unexpected translation'); },
+      translate: (direction, text, onEvent) => {
+        translations.push({ direction, text });
+        return translate(direction, text, onEvent);
+      },
     },
     './settings': {
-      useSettingsStore: { getState: () => ({ settings: null }) },
+      useSettingsStore: { getState: () => ({ settings: mode ? { translation: { mode } } : null }) },
     },
   };
   const module = new SourceTextModule(source, { context });
@@ -67,6 +76,7 @@ async function setup({ save = async () => {} } = {}) {
   return {
     store: module.namespace.useChatStore,
     writes,
+    translations,
     serializations,
     async flush() {
       for (const [id, { callback, delay }] of [...timers]) {
@@ -183,4 +193,133 @@ test('tool-call updates preserve results, incoming order and previous calls', as
   assert.equal(calls[0].label, 'updated');
   assert.equal(calls[0].result, 'failed output');
   assert.equal(calls[0].isError, true);
+});
+
+const PLAN = '# Implementation plan\n\n1. Preserve history.\n2. Render Markdown.\n\n```ts\nconst ready = true;\n```\n\nFinal verification step without a trailing period';
+const PLAN_CALL = { id: 'exit-plan', name: 'ExitPlanMode', label: 'ExitPlanMode', detail: 'plan.md' };
+
+function planUpdate(text = PLAN) {
+  return {
+    key: 'plan', role: 'assistant', text, ts: null, thinking: null,
+    done: true, toolCalls: [PLAN_CALL], toolResult: null,
+  };
+}
+
+function cachedPlan(overrides = {}) {
+  return {
+    key: 'plan', role: 'assistant', original: '', translation: null,
+    working: false, error: null, ts: null, thinking: null,
+    toolCalls: [PLAN_CALL], done: true, ...overrides,
+  };
+}
+
+async function settleTranslation() {
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+}
+
+test('plan replay repairs a cached bubble in place and survives approval and reopening', async () => {
+  const cached = [
+    cachedPlan({ key: 'before', role: 'user', original: 'Make a plan.', toolCalls: [] }),
+    cachedPlan({ toolCalls: [PLAN_CALL, { id: 'read', name: 'Read', detail: 'file', result: 'retained output' }] }),
+    cachedPlan({ key: 'after', original: 'Later response.', toolCalls: [] }),
+  ];
+  const { store, writes, translations, flush } = await setup({ load: async () => JSON.stringify(cached) });
+  await store.getState().hydrate('conv');
+  for (let i = 0; i < 3; i++) store.getState().upsertFromSession('conv', [planUpdate()], false);
+  store.getState().upsertFromSession('conv', [{ ...planUpdate(''), toolCalls: [], done: false }], false);
+  const messages = store.getState().byConv.conv;
+  assert.deepEqual(Array.from(messages, (m) => m.key), ['before', 'plan', 'after']);
+  assert.equal(messages[1].original, PLAN);
+  assert.equal(messages[1].done, true);
+  assert.equal(messages[1].toolCalls[0].result, undefined, 'plan display must not imply approval');
+  assert.equal(messages[1].toolCalls[1].result, 'retained output');
+
+  store.getState().upsertFromSession('conv', [{
+    ...planUpdate(''), key: 'tr-exit-plan', role: 'user', toolCalls: [],
+    toolResult: { callId: 'exit-plan', text: 'Plan approved.', isError: false },
+  }], false);
+  assert.equal(store.getState().byConv.conv.length, 3);
+  assert.equal(store.getState().byConv.conv[1].original, PLAN);
+  await flush();
+  assert.equal(translations.length, 0);
+  const restored = await setup({ load: async () => writes.at(-1).json });
+  await restored.store.getState().hydrate('conv');
+  const reopened = restored.store.getState().byConv.conv;
+  assert.deepEqual(Array.from(reopened, (m) => m.key), ['before', 'plan', 'after']);
+  assert.equal(reopened[1].original, PLAN);
+  assert.equal(reopened[1].toolCalls[0].result, 'Plan approved.');
+});
+
+test('plan replay arriving during hydration wins over the older cached tool-only message', async () => {
+  const pending = Promise.withResolvers();
+  const { store } = await setup({ load: () => pending.promise });
+  const hydration = store.getState().hydrate('conv');
+  store.getState().upsertFromSession('conv', [planUpdate()], false);
+  pending.resolve(JSON.stringify([cachedPlan()]));
+  await hydration;
+  assert.equal(store.getState().byConv.conv.length, 1);
+  assert.equal(store.getState().byConv.conv[0].original, PLAN);
+});
+
+test('untranslated plan replay enriches source while retaining cached translation coverage', async () => {
+  const preamble = 'Here is the plan.';
+  const { store, translations } = await setup({
+    load: async () => JSON.stringify([cachedPlan({
+      original: preamble, translation: '以下是计划。', translatedFrom: preamble,
+    })]),
+  });
+  await store.getState().hydrate('conv');
+  const enriched = `${preamble}\n\n${PLAN}`;
+  store.getState().upsertFromSession('conv', [planUpdate(enriched)], false);
+  const message = store.getState().byConv.conv[0];
+  assert.equal(message.original, enriched);
+  assert.equal(message.translation, '以下是计划。');
+  assert.equal(message.translatedFrom, preamble);
+  assert.equal(translations.length, 0, 'imported historical replay must not translate');
+});
+
+test('native plan replay translates the full document before approval and skips unchanged replay', async () => {
+  const pending = Promise.withResolvers();
+  const { store, translations } = await setup({
+    load: async () => JSON.stringify([cachedPlan()]),
+    translate: (_direction, _text, onEvent) => {
+      onEvent({ type: 'delta', text: '部分译文' });
+      return pending.promise;
+    },
+  });
+  await store.getState().hydrate('conv');
+  store.getState().upsertFromSession('conv', [planUpdate()]);
+  assert.deepEqual(translations, [{ direction: 'en-zh', text: PLAN }]);
+  const translating = store.getState().byConv.conv[0];
+  assert.equal(translating.original, PLAN);
+  assert.equal(translating.translation, '部分译文');
+  assert.equal(translating.working, true);
+  assert.notEqual(translating.translatedFrom, PLAN);
+  pending.resolve('# 完整计划\n\n保留最终验证步骤');
+  await settleTranslation();
+  const complete = store.getState().byConv.conv[0];
+  assert.equal(complete.translatedFrom, PLAN);
+  assert.equal(complete.translation, '# 完整计划\n\n保留最终验证步骤');
+  assert.equal(complete.working, false);
+  store.getState().upsertFromSession('conv', [planUpdate()]);
+  assert.equal(translations.length, 1);
+});
+
+test('local plan translation preserves its covered prefix and translates the final unfinished tail', async () => {
+  const prefix = '# Plan\n\nFirst completed step.\n\n';
+  const tail = 'Final verification step without a trailing period';
+  const { store, translations } = await setup({
+    mode: 'local',
+    load: async () => JSON.stringify([cachedPlan({
+      original: prefix, translation: '# 计划\n\n第一步。\n\n', translatedFrom: prefix, done: false,
+    })]),
+    translate: async () => '最终验证步骤',
+  });
+  await store.getState().hydrate('conv');
+  store.getState().upsertFromSession('conv', [planUpdate(prefix + tail)]);
+  await settleTranslation();
+  assert.deepEqual(translations, [{ direction: 'en-zh', text: tail }]);
+  const message = store.getState().byConv.conv[0];
+  assert.equal(message.translation, '# 计划\n\n第一步。\n\n最终验证步骤');
+  assert.equal(message.translatedFrom, prefix + tail);
 });

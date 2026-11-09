@@ -60,10 +60,36 @@ export default memo(function MessageBubble({
   // prompt text. Restored turns can still carry it, so strip it for display.
   const hasImageMarker = /\[Image #\d+\]/.test(msg.original);
   const userText = msg.original.replace(/\[Image #\d+\]/g, ' ').replace(/\s+/g, ' ').trim();
+  // Keep a plan readable while its translation is incomplete or a replay
+  // enriches an older cached body. Ordinary replies still stream translated text.
+  const isPlan = !isUser && msg.toolCalls.some((t) => t.name === 'ExitPlanMode');
+  const translation = isPlan && (
+    msg.working || msg.error || !msg.translation?.trim() || msg.translatedFrom !== msg.original
+  ) ? null : msg.translation;
   // Primary display: user → 中文原文; assistant → 中文译文（无译文时显示英文原文）
-  const primary = isUser ? userText : (msg.translation ?? msg.original);
+  const primary = isUser ? userText : (translation ?? msg.original);
   const secondary = isUser ? msg.translation : msg.original;
   const thinking = msg.thinking?.trim() ?? '';
+
+  if (isPlan && primary.trim()) {
+    return (
+      <article className="plan-card" aria-label="plan">
+        <header className="plan-card-header">
+          <FileIcon size={14} />
+          <span>plan</span>
+          {(msg.working || msg.error) && (
+            <span className="plan-card-status" role="status" title={msg.error ?? undefined}>
+              {msg.working ? '翻译中…' : '翻译失败，显示原文'}
+            </span>
+          )}
+        </header>
+        <div className="plan-card-body">
+          <Markdown>{primary}</Markdown>
+        </div>
+      </article>
+    );
+  }
+
   // Empty body: an image turn already shows its thumbnails above; a restored
   // image turn (paths are not persisted) says so without the dead thumbnail;
   // only an assistant bubble's emptiness means "still working".

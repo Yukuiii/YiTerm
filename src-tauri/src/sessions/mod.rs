@@ -186,7 +186,8 @@ const SKIP_USER_PREFIXES: [&str; 6] = [
 
 /// The user line Claude Code writes when a running turn is interrupted.
 pub(crate) fn is_interrupt_marker(text: &str) -> bool {
-    text.trim_start().starts_with("[Request interrupted by user")
+    text.trim_start()
+        .starts_with("[Request interrupted by user")
 }
 
 /// Claude Code's local placeholder for a request that ended without any API
@@ -357,6 +358,7 @@ pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
                 return Vec::new();
             };
             let mut text = String::new();
+            let mut plans = Vec::new();
             let mut thinking = None;
             let mut tool_calls = Vec::new();
             if let Some(blocks) = message.get("content").and_then(Value::as_array) {
@@ -386,6 +388,16 @@ pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
                                 .and_then(Value::as_str)
                                 .unwrap_or_default()
                                 .to_string();
+                            if name == "ExitPlanMode"
+                                && let Some(plan) = block
+                                    .pointer("/input/plan")
+                                    .and_then(Value::as_str)
+                                    .filter(|plan| !plan.trim().is_empty())
+                            {
+                                // The document is available before approval, independently
+                                // of the abbreviated tool details and eventual tool result.
+                                plans.push(plan);
+                            }
                             tool_calls.push(ToolCall {
                                 id,
                                 label: summarize_tool_label(block.get("input"), &name),
@@ -395,6 +407,14 @@ pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
                         }
                         _ => {}
                     }
+                }
+            }
+            for plan in plans {
+                if !text.contains(plan) {
+                    if !text.is_empty() {
+                        text.push_str("\n\n");
+                    }
+                    text.push_str(plan);
                 }
             }
             if text.is_empty() && thinking.is_none() && tool_calls.is_empty() {
@@ -619,6 +639,99 @@ mod tests {
         assert!(m.done);
     }
 
+    fn exit_plan_message(input: Value) -> Value {
+        json!({
+            "type": "assistant", "uuid": "plan-line",
+            "timestamp": "2026-11-09T13:39:46Z",
+            "message": {
+                "id": "msg-plan", "stop_reason": "tool_use",
+                "content": [{
+                    "type": "tool_use", "id": "call-plan", "name": "ExitPlanMode",
+                    "input": input
+                }]
+            }
+        })
+    }
+
+    #[test]
+    fn plan_document_is_available_before_approval() {
+        let plan = format!(
+            "# Implementation plan\n\n{}\n\n## Verification\n\n- [ ] 检查结果\n\n```rust\nfn main() {{}}\n```\n\nFinal verification paragraph.\n",
+            "Preserve the complete document, including each implementation step.\n".repeat(100)
+        );
+        assert!(plan.len() > TOOL_RESULT_MAX);
+        let v = exit_plan_message(json!({
+            "plan": plan, "planFilePath": "/missing/.claude/plans/example.md"
+        }));
+        // No tool result exists yet: Claude Code is waiting for plan approval.
+        let msgs = parse_line(&v);
+        assert_eq!(msgs.len(), 1);
+        let msg = &msgs[0];
+        assert_eq!(msg.text, plan);
+        assert_eq!(msg.key, "msg-plan");
+        assert_eq!(msg.ts.as_deref(), Some("2026-11-09T13:39:46Z"));
+        assert!(msg.done);
+        assert!(msg.tool_result.is_none());
+        assert_eq!(msg.tool_calls.len(), 1);
+        assert_eq!(msg.tool_calls[0].id, "call-plan");
+        assert_eq!(msg.tool_calls[0].name, "ExitPlanMode");
+        assert!(
+            !msg.tool_calls[0]
+                .detail
+                .contains("Final verification paragraph.")
+        );
+    }
+
+    #[test]
+    fn plan_document_preserves_prose_without_duplication() {
+        let plan = "# Plan\n\n1. Implement it.\n2. Verify it.\n";
+        let combined = format!("Here is the plan.\n\n{plan}");
+        for prose in ["Here is the plan.", combined.as_str()] {
+            let mut v = exit_plan_message(json!({ "plan": plan }));
+            let blocks = v["message"]["content"].as_array_mut().unwrap();
+            blocks.insert(0, json!({ "type": "text", "text": prose }));
+            blocks.push(json!({ "type": "thinking", "thinking": "Ready to present." }));
+            let msgs = parse_line(&v);
+            assert_eq!(msgs[0].text, combined);
+            assert_eq!(msgs[0].thinking.as_deref(), Some("Ready to present."));
+            assert_eq!(msgs[0].tool_calls.len(), 1);
+        }
+    }
+
+    #[test]
+    fn plan_document_ignores_missing_blank_and_malformed_inputs() {
+        for input in [
+            Value::Null,
+            json!("invalid input"),
+            json!({}),
+            json!({ "plan": null }),
+            json!({ "plan": "" }),
+            json!({ "plan": " \n\t " }),
+            json!({ "plan": 42 }),
+            json!({ "plan": ["not a string"] }),
+        ] {
+            let msgs = parse_line(&exit_plan_message(input));
+            assert_eq!(msgs.len(), 1);
+            assert!(msgs[0].text.is_empty());
+            assert_eq!(msgs[0].tool_calls[0].name, "ExitPlanMode");
+        }
+    }
+
+    #[test]
+    fn plan_document_does_not_promote_other_tool_inputs() {
+        for name in ["Write", "Edit", "EnterPlanMode", "CustomTool"] {
+            let mut v = exit_plan_message(json!({
+                "plan": "# Plan\n\nDo this.",
+                "content": "# Plan\n\nDo this.",
+                "file_path": "/tmp/notes.md"
+            }));
+            v["message"]["content"][0]["name"] = json!(name);
+            let msgs = parse_line(&v);
+            assert!(msgs[0].text.is_empty());
+            assert_eq!(msgs[0].tool_calls[0].name, name);
+        }
+    }
+
     #[test]
     fn tool_detail_from_various_inputs() {
         assert_eq!(
@@ -653,7 +766,13 @@ mod tests {
 
     #[test]
     fn ignores_non_conversational_types() {
-        for t in ["system", "mode", "permission-mode", "api-request", "file-history-snapshot"] {
+        for t in [
+            "system",
+            "mode",
+            "permission-mode",
+            "api-request",
+            "file-history-snapshot",
+        ] {
             let v = json!({ "type": t, "message": { "role": "user", "content": "x" } });
             assert!(parse_line(&v).is_empty(), "{t} should be ignored");
         }

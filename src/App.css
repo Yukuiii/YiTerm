@@ -596,6 +596,35 @@ button, input, textarea { font-family: inherit; }
   border: 0;
 }
 
+.plan-card {
+  width: 100%;
+  min-width: 0;
+  flex-shrink: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: #111111;
+  word-break: break-word;
+}
+.plan-card-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--fg-soft);
+  font-size: 12px;
+  font-weight: 500;
+}
+.plan-card-status {
+  margin-left: auto;
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+.plan-card-body { padding: 16px 18px; }
+
 .bubble-images {
   display: flex;
   flex-wrap: wrap;
