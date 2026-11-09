@@ -9,15 +9,19 @@ import * as jsxRuntime from 'react/jsx-runtime';
 import { transformWithOxc } from 'vite';
 
 // Render the actual activity component without a desktop bridge or new test dependencies.
-const context = createContext({});
-const files = ['src/toolActivity.ts', 'src/format.ts', 'src/components/Icons.tsx', 'src/components/ToolActivity.tsx'];
+const context = createContext({ URL });
+const files = ['src/toolActivity.ts', 'src/format.ts', 'src/links.ts', 'src/components/ContentLink.tsx', 'src/components/Icons.tsx', 'src/components/ToolActivity.tsx'];
 const modules = new Map(await Promise.all(files.map(async (file) => {
   const url = new URL(`../${file}`, import.meta.url);
   const source = await readFile(url, 'utf8');
   const { code } = await transformWithOxc(source, url.pathname, { jsx: { runtime: 'automatic' } });
   return [url.href, new SourceTextModule(code, { context, identifier: url.href })];
 })));
-const externals = new Map(Object.entries({ react, 'react/jsx-runtime': jsxRuntime }).map(([name, exports]) => [
+const externals = new Map(Object.entries({
+  react, 'react/jsx-runtime': jsxRuntime,
+  '@tauri-apps/plugin-opener': { openUrl: async () => {}, openPath: async () => {} },
+  '@tauri-apps/api/path': { homeDir: async () => '/Users/test', resolve: async (...parts) => parts.join('/') },
+}).map(([name, exports]) => [
   name, new SyntheticModule(Object.keys(exports), function () {
     for (const [key, value] of Object.entries(exports)) this.setExport(key, value);
   }, { context }),

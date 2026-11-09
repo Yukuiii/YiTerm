@@ -54,7 +54,11 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 - **Session mirror** from Claude Code's JSONL transcript
   - consecutive thinking and tool activity grouped under one collapsible summary, with thinking/file/tool counts
   - thinking, tool commands, results, and errors revealed on expand
-- **GitHub-flavoured Markdown**: tables, code blocks, lists; links open in the system browser
+- **GitHub-flavoured Markdown**: tables, code blocks, lists
+- **Clickable URLs throughout chat** — URLs in replies, prompts, code, thinking,
+  and tool output open in the system browser; explicit Markdown link targets are preserved
+- **Clickable local files** — source paths with line/column suffixes and `file://`
+  links open in their default application; relative paths use the conversation's project folder
 - **Project-grouped sessions** with search and per-project “new session”
 - **Claude Code records in the sidebar** — every project registered in
   `~/.claude.json` plus existing CLI sessions are listed and resumable;

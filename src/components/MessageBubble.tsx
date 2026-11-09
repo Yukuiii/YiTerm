@@ -2,6 +2,7 @@ import { memo, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { Msg } from '../stores/chat';
 import Markdown from './Markdown';
+import { LinkedText } from './ContentLink';
 import PlanCard, { type PlanControls } from './PlanCard';
 import ToolActivity from './ToolActivity';
 import { FileIcon } from './Icons';
@@ -94,7 +95,7 @@ export default memo(function MessageBubble({
         )}
 
         <div className="bubble-text">
-          {primary.trim() ? (isUser ? primary : <Markdown>{primary}</Markdown>) : emptyBody}
+          {primary.trim() ? (isUser ? <LinkedText>{primary}</LinkedText> : <Markdown>{primary}</Markdown>) : emptyBody}
         </div>
 
         {msg.working && <div className="bubble-working">翻译中…</div>}
@@ -108,7 +109,7 @@ export default memo(function MessageBubble({
           </div>
         )}
         {isUser && secondary && secondary !== msg.original && !msg.error && (
-          <div className="bubble-secondary" title="英文译文">{secondary}</div>
+          <div className="bubble-secondary" title="英文译文"><LinkedText>{secondary}</LinkedText></div>
         )}
         {isUser && msg.interrupted && (
           <div className="bubble-interrupted-row">

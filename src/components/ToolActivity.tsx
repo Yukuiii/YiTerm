@@ -2,6 +2,7 @@ import { memo } from 'react';
 import type { Msg, ToolCallItem } from '../stores/chat';
 import { oneLine } from '../format';
 import { summarizeToolActivity } from '../toolActivity';
+import { LinkedText } from './ContentLink';
 import { ChevronIcon, FileIcon, SearchIcon, SparkleIcon, TerminalIcon, WrenchIcon } from './Icons';
 
 /** One-line verb for tool steps whose label is a bare path/pattern/url. */
@@ -27,7 +28,7 @@ function ThinkingLine({ thinking }: { thinking: string }) {
         <ChevronIcon size={13} className="step-chevron" />
       </summary>
       <div className="step-body">
-        <div className="thinking-body">{thinking}</div>
+        <div className="thinking-body"><LinkedText>{thinking}</LinkedText></div>
       </div>
     </details>
   );
@@ -61,9 +62,9 @@ function ToolStep({ tool }: { tool: ToolCallItem }) {
         <ChevronIcon size={13} className="step-chevron" />
       </summary>
       <div className="step-body">
-        {detail && <pre className="step-command">{detail}</pre>}
+        {detail && <pre className="step-command"><LinkedText>{detail}</LinkedText></pre>}
         {tool.result !== undefined ? (
-          <pre className="step-output">{tool.result || '（无输出）'}</pre>
+          <pre className="step-output"><LinkedText>{tool.result || '（无输出）'}</LinkedText></pre>
         ) : (
           <div className="step-pending">等待输出…</div>
         )}

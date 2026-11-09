@@ -30,6 +30,7 @@ import type { ViewMode } from './types';
 import Sidebar from './components/Sidebar';
 import NewSessionView from './components/NewSessionView';
 import ChatPanel from './components/ChatPanel';
+import { ContentLinkProvider } from './components/ContentLink';
 import TerminalPanel from './components/TerminalPanel';
 import SettingsPage from './components/SettingsPage';
 import UpdateDialog from './components/UpdateDialog';
@@ -320,7 +321,9 @@ export default function App() {
           {activeId ? (
             <div className={`session ${viewMode}`}>
               <div className="pane pane-chat">
-                <ChatPanel convId={activeId} onOpenTerminal={openTerminal} />
+                <ContentLinkProvider folder={activeConv?.folder}>
+                  <ChatPanel convId={activeId} onOpenTerminal={openTerminal} />
+                </ContentLinkProvider>
               </div>
               {viewMode === 'code' && (
                 <>
