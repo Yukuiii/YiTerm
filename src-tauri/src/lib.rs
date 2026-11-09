@@ -1,3 +1,4 @@
+mod git;
 mod ipc;
 mod sessions;
 mod settings;
@@ -22,6 +23,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            git::git_status,
+            git::git_diff,
             ipc::terminal_start,
             ipc::terminal_write,
             ipc::terminal_send_prompt,

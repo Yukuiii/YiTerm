@@ -60,7 +60,10 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 - **Claude Code records in the sidebar** — every project registered in
   `~/.claude.json` plus existing CLI sessions are listed and resumable;
   replayed history is shown as-is, while new replies are still translated
-- **Two layouts**: Code (chat + terminal) and Work (chat only)
+- **Two layouts**: Code (chat + terminal + Git changes) and Work (chat only)
+- **Git changes in Code mode** — staged and unstaged file lists beneath the terminal;
+  click a file to open its diff, with automatic refresh and support for new files,
+  renames, deletions, binary files, and merge conflicts
 - **Persistence**: conversations, chat history, and translation settings
 - **API keys in a local `keys.json`** (one per chat provider)
 - **System proxy detection** via `scutil`, so translation works behind a local proxy
@@ -92,6 +95,7 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 - Node.js 22+
 - Rust 1.90+
 - [Claude Code](https://github.com/anthropics/claude-code) installed and authenticated (`claude`)
+- Git installed for the Code-mode changes viewer
 - Network access to Google Translate endpoints, DeepL, or an OpenAI-compatible
   provider (not needed in local mode once the model has been downloaded from
   Settings)

@@ -131,6 +131,34 @@ export const conversationsList = () => invoke<ConversationsOverview>('conversati
 export const conversationsCreate = (folder: string, title?: string) =>
   invoke<Conversation>('conversations_create', { folder, title: title ?? null });
 
+// ---------- Git changes ----------
+
+export type GitArea = 'staged' | 'unstaged';
+
+export interface GitFileChange {
+  path: string;
+  originalPath: string | null;
+  status: string;
+  conflicted: boolean;
+}
+
+export interface GitStatus {
+  root: string | null;
+  staged: GitFileChange[];
+  unstaged: GitFileChange[];
+}
+
+export interface GitDiff {
+  text: string;
+  kind: 'text' | 'binary' | 'conflict' | 'empty';
+  truncated: boolean;
+}
+
+export const gitStatus = (folder: string) => invoke<GitStatus>('git_status', { folder });
+
+export const gitDiff = (folder: string, area: GitArea, path: string) =>
+  invoke<GitDiff>('git_diff', { folder, area, path });
+
 // ---------- diagnostics ----------
 
 export const debugLog = (message: string) =>
