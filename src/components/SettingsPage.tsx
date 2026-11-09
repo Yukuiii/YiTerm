@@ -12,6 +12,7 @@ import {
   type Settings,
   type TerminalSettings,
   type TranslationSettings,
+  type UpdateInfo,
 } from '../ipc';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { useSettingsStore } from '../stores/settings';
@@ -71,12 +72,18 @@ const SETTINGS_NAV = [
 
 type SettingsTab = (typeof SETTINGS_NAV)[number]['items'][number]['id'];
 
-export default function SettingsPage({ onClose }: { onClose: () => void }) {
+export default function SettingsPage({ onClose, onCheckForUpdates }: {
+  onClose: () => void;
+  onCheckForUpdates: () => Promise<UpdateInfo | null>;
+}) {
   const { settings, save } = useSettingsStore();
   // Edits live in a draft; when untouched the loaded settings are the value.
   const [draft, setDraft] = useState<Settings | null>(null);
   const [tab, setTab] = useState<SettingsTab>('translation');
   const [appVersion, setAppVersion] = useState('读取中…');
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [updateResult, setUpdateResult] = useState<{ message: string; error: boolean } | null>(null);
+  const updateRequest = useRef(0);
   const [apiKeyDraft, setApiKeyDraft] = useState('');
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
@@ -106,6 +113,8 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
       alive = false;
     };
   }, []);
+
+  useEffect(() => () => { updateRequest.current++; }, []);
 
   // Status is best-effort; on failure the section simply stays blank.
   const refreshModel = useCallback(() => {
@@ -201,6 +210,27 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
     setSaved(true);
     window.setTimeout(() => setSaved(false), 1500);
     refreshModel();
+  };
+
+  const checkForUpdates = async () => {
+    const request = ++updateRequest.current;
+    setCheckingUpdates(true);
+    setUpdateResult(null);
+    try {
+      const info = await onCheckForUpdates();
+      if (request === updateRequest.current) {
+        setUpdateResult({
+          message: info ? `发现新版本 ${info.latestVersion}。` : '当前已是最新版本。',
+          error: false,
+        });
+      }
+    } catch (e) {
+      if (request === updateRequest.current) {
+        setUpdateResult({ message: `检查更新失败：${String(e)}`, error: true });
+      }
+    } finally {
+      if (request === updateRequest.current) setCheckingUpdates(false);
+    }
   };
 
   const runTest = async () => {
@@ -650,6 +680,25 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     </div>
                     <span className="setting-title">{appVersion}</span>
                   </div>
+                  <div className="setting-row">
+                    <div className="setting-copy">
+                      <div className="setting-title">应用更新</div>
+                      <div className="setting-desc">每小时自动检查，也可手动检查新版本。</div>
+                    </div>
+                    <button
+                      className="primary-btn"
+                      onClick={() => void checkForUpdates()}
+                      disabled={checkingUpdates}
+                      aria-busy={checkingUpdates}
+                    >
+                      {checkingUpdates ? '正在检查…' : 'Check for Updates'}
+                    </button>
+                  </div>
+                  {updateResult && (
+                    <div className="test-result" role={updateResult.error ? 'alert' : 'status'}>
+                      {updateResult.message}
+                    </div>
+                  )}
                 </section>
               </>
             )}

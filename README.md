@@ -65,6 +65,8 @@ Claude Code is a great coding agent, but it works in English and its conversatio
   Document Review, with staged and unstaged files and file-type icons; click a file
   to open its diff, with automatic refresh and support for new files, renames,
   deletions, binary files, and merge conflicts
+- **Update checks** at launch and every hour while running, with a manual
+  **Check for Updates** button in Settings → About
 - **Persistence**: conversations, chat history, and translation settings
 - **API keys in a local `keys.json`** (one per chat provider)
 - **System proxy detection** via `scutil`, so translation works behind a local proxy

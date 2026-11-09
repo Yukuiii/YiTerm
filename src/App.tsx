@@ -24,6 +24,7 @@ import { useSettingsStore } from './stores/settings';
 import { useTerminalsStore } from './stores/terminals';
 import { useSessionTitles } from './hooks/useSessionTitles';
 import { folderName } from './format';
+import { createUpdateChecker } from './updates';
 import type { ViewMode } from './types';
 import Sidebar from './components/Sidebar';
 import NewSessionView from './components/NewSessionView';
@@ -55,6 +56,7 @@ export default function App() {
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateChecker] = useState(() => createUpdateChecker(updateCheck, setUpdateInfo));
   const [newFolder, setNewFolder] = useState<string | null>(null);
   const [userName, setUserName] = useState('user');
 
@@ -89,18 +91,10 @@ export default function App() {
     localStorage.setItem('yiterm.viewMode', viewMode);
   }, [viewMode]);
 
-  // Check GitHub for a newer release shortly after launch. Failures are
-  // silent: a missing network or a rate-limited API must not disturb startup.
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void updateCheck()
-        .then((info) => {
-          if (info) setUpdateInfo(info);
-        })
-        .catch(() => {});
-    }, 2500);
-    return () => window.clearTimeout(timer);
-  }, []);
+    updateChecker.start();
+    return updateChecker.stop;
+  }, [updateChecker]);
 
   // Claude Code can start sessions outside YiTerm (CLI, another window).
   // Re-scan while visible and whenever the window regains focus.
@@ -377,9 +371,14 @@ export default function App() {
         </footer>
       </main>
 
-      {settingsOpen && <SettingsPage onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <SettingsPage
+          onClose={() => setSettingsOpen(false)}
+          onCheckForUpdates={() => updateChecker.check(true)}
+        />
+      )}
       {updateInfo && (
-        <UpdateDialog info={updateInfo} onClose={() => setUpdateInfo(null)} />
+        <UpdateDialog info={updateInfo} onClose={updateChecker.dismiss} />
       )}
     </div>
   );
