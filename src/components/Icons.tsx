@@ -126,6 +126,15 @@ export const CodeIcon = ({ size = 16 }: { size?: number }) => (
   </Icon>
 );
 
+export const GitBranchIcon = ({ size = 16 }: { size?: number }) => (
+  <Icon size={size}>
+    <circle cx="6" cy="5" r="2" />
+    <circle cx="6" cy="19" r="2" />
+    <circle cx="18" cy="5" r="2" />
+    <path d="M6 7v10M18 7v3a5 5 0 0 1-5 5H6" />
+  </Icon>
+);
+
 export const ChatIcon = ({ size = 16 }: { size?: number }) => (
   <Icon size={size}>
     <path d="M20.5 11.5a7.5 7.5 0 0 1-7.5 7.5H8l-4.5 3v-4.4a7.5 7.5 0 0 1 4-10.9 7.5 7.5 0 0 1 13 4.8z" />

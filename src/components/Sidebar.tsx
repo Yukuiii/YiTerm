@@ -1,20 +1,24 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { Conversation } from '../ipc';
 import type { ViewMode } from '../types';
 import { useTerminalsStore } from '../stores/terminals';
 import { folderName, oneLine } from '../format';
+import GitChangesPanel from './GitChangesPanel';
 import {
   ChatIcon,
   ChevronIcon,
   CodeIcon,
   FolderIcon,
   GearIcon,
+  GitBranchIcon,
   MoreIcon,
   PlusIcon,
   SearchIcon,
   SlidersIcon,
   SpinnerIcon,
 } from './Icons';
+
+type SidebarView = 'sessions' | 'git';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -48,6 +52,14 @@ export default function Sidebar({
   onRevealConfig,
   onRevealLogs,
 }: SidebarProps) {
+  const [view, setView] = useState<SidebarView>(() =>
+    localStorage.getItem('yiterm.sidebarView') === 'git' ? 'git' : 'sessions',
+  );
+  const viewId = useId();
+  const viewTabs = useRef<Partial<Record<SidebarView, HTMLButtonElement | null>>>({});
+  useEffect(() => {
+    localStorage.setItem('yiterm.sidebarView', view);
+  }, [view]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [moreOpen, setMoreOpen] = useState(false);
@@ -100,6 +112,27 @@ export default function Sidebar({
     setQuery('');
   };
 
+  const selectView = (next: SidebarView) => {
+    setView(next);
+    setMoreOpen(false);
+    viewTabs.current[next]?.focus();
+  };
+
+  const onViewKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    let next: SidebarView;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      next = view === 'sessions' ? 'git' : 'sessions';
+    } else if (event.key === 'Home') {
+      next = 'sessions';
+    } else if (event.key === 'End') {
+      next = 'git';
+    } else {
+      return;
+    }
+    event.preventDefault();
+    selectView(next);
+  };
+
   return (
     <aside className="sidebar">
       <div className="sidebar-top" data-tauri-drag-region>
@@ -127,7 +160,32 @@ export default function Sidebar({
         </div>
       </div>
 
-      <div className="sidebar-body">
+      <div className="sidebar-view-switch" role="tablist" aria-label="侧边栏视图" onKeyDown={onViewKeyDown}>
+        {(['sessions', 'git'] as const).map((tab) => (
+          <button
+            key={tab}
+            ref={(element) => { viewTabs.current[tab] = element; }}
+            id={`${viewId}-${tab}-tab`}
+            className={`sidebar-view-tab${view === tab ? ' active' : ''}`}
+            role="tab"
+            aria-selected={view === tab}
+            aria-controls={`${viewId}-${tab}-panel`}
+            tabIndex={view === tab ? 0 : -1}
+            onClick={() => selectView(tab)}
+          >
+            {tab === 'sessions' ? <ChatIcon size={14} /> : <GitBranchIcon size={14} />}
+            <span>{tab === 'sessions' ? 'Sessions' : 'Git'}</span>
+          </button>
+        ))}
+      </div>
+
+      <div
+        className="sidebar-body"
+        id={`${viewId}-sessions-panel`}
+        role="tabpanel"
+        aria-labelledby={`${viewId}-sessions-tab`}
+        hidden={view !== 'sessions'}
+      >
         <button className="new-session-btn" onClick={onNew}>
           <PlusIcon size={16} />
           <span>新会话</span>
@@ -250,6 +308,23 @@ export default function Sidebar({
             </div>
           )}
         </div>
+      </div>
+
+      <div
+        className="sidebar-body sidebar-review"
+        id={`${viewId}-git-panel`}
+        role="tabpanel"
+        aria-labelledby={`${viewId}-git-tab`}
+        hidden={view !== 'git'}
+      >
+        {view === 'git' && (activeFolder ? (
+          <GitChangesPanel key={activeFolder} folder={activeFolder} />
+        ) : (
+          <div className="sidebar-review-empty">
+            <p>选择一个会话以查看项目更改。</p>
+            <button className="sidebar-view-return" onClick={() => selectView('sessions')}>Sessions</button>
+          </div>
+        ))}
       </div>
 
       <div className="sidebar-foot">

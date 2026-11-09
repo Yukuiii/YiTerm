@@ -60,10 +60,11 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 - **Claude Code records in the sidebar** — every project registered in
   `~/.claude.json` plus existing CLI sessions are listed and resumable;
   replayed history is shown as-is, while new replies are still translated
-- **Two layouts**: Code (chat + terminal + Git changes) and Work (chat only)
-- **Git changes in Code mode** — staged and unstaged file lists beneath the terminal;
-  click a file to open its diff, with automatic refresh and support for new files,
-  renames, deletions, binary files, and merge conflicts
+- **Two layouts**: Code (chat + terminal) and Work (chat only)
+- **Sessions / Git sidebar views** — switch between project-grouped sessions and
+  Document Review, with staged and unstaged files and file-type icons; click a file
+  to open its diff, with automatic refresh and support for new files, renames,
+  deletions, binary files, and merge conflicts
 - **Persistence**: conversations, chat history, and translation settings
 - **API keys in a local `keys.json`** (one per chat provider)
 - **System proxy detection** via `scutil`, so translation works behind a local proxy

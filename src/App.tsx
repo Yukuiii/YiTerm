@@ -29,7 +29,6 @@ import Sidebar from './components/Sidebar';
 import NewSessionView from './components/NewSessionView';
 import ChatPanel from './components/ChatPanel';
 import TerminalPanel from './components/TerminalPanel';
-import GitChangesPanel from './components/GitChangesPanel';
 import SettingsPage from './components/SettingsPage';
 import UpdateDialog from './components/UpdateDialog';
 import { FolderIcon, TerminalIcon } from './components/Icons';
@@ -326,7 +325,6 @@ export default function App() {
                   <div className="splitter" id="pane-splitter" />
                   <div className="pane pane-term">
                     <TerminalPanel convId={activeId} />
-                    {activeConv && <GitChangesPanel key={activeConv.folder} folder={activeConv.folder} />}
                   </div>
                 </>
               )}

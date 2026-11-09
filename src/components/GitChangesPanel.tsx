@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { gitStatus, type GitArea, type GitFileChange, type GitStatus } from '../ipc';
 import GitDiffDialog from './GitDiffDialog';
-import { ChevronIcon, FileIcon, SpinnerIcon } from './Icons';
+import FileTypeIcon from './FileTypeIcon';
+import { ChevronIcon } from './Icons';
 
 const STATUS_LABELS: Record<string, string> = {
   A: '新增', M: '修改', D: '删除', R: '重命名', C: '复制',
@@ -17,7 +18,6 @@ export default function GitChangesPanel({ folder }: { folder: string }) {
   const [collapsed, setCollapsed] = useState(false);
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
   const [revision, setRevision] = useState(0);
   const [selection, setSelection] = useState<Selection | null>(null);
   const expandedRef = useRef(true);
@@ -33,7 +33,6 @@ export default function GitChangesPanel({ folder }: { folder: string }) {
     const refresh = async () => {
       if (request.disposed || request.running || document.visibilityState !== 'visible') return;
       request.running = true;
-      setRefreshing(true);
       try {
         const next = await gitStatus(folder);
         if (!request.disposed) {
@@ -46,7 +45,6 @@ export default function GitChangesPanel({ folder }: { folder: string }) {
         if (!request.disposed) setError(String(e));
       } finally {
         request.running = false;
-        if (!request.disposed) setRefreshing(false);
       }
     };
     const refreshVisible = () => {
@@ -77,7 +75,7 @@ export default function GitChangesPanel({ folder }: { folder: string }) {
   );
 
   return (
-    <section className={`git-panel${collapsed ? ' collapsed' : ''}`} aria-label="Git 文件更改">
+    <section className={`git-panel${collapsed ? ' collapsed' : ''}`} aria-label="Document Review">
       <div className="git-panel-head">
         <button
           className="git-panel-toggle"
@@ -87,17 +85,8 @@ export default function GitChangesPanel({ folder }: { folder: string }) {
           onClick={() => setCollapsed((value) => !value)}
         >
           <ChevronIcon size={13} className={collapsed ? '' : 'expanded'} />
-          <span>文件更改</span>
+          <span>Document Review</span>
           {status?.root && <span className="git-count">{total}</span>}
-        </button>
-        <button
-          className="git-refresh"
-          onClick={() => refreshRef.current()}
-          disabled={refreshing}
-          aria-label="刷新文件更改"
-        >
-          {refreshing && <span className="git-spinner"><SpinnerIcon size={12} /></span>}
-          刷新
         </button>
       </div>
       <div id={bodyId} className="git-panel-body" hidden={collapsed}>
@@ -108,7 +97,7 @@ export default function GitChangesPanel({ folder }: { folder: string }) {
           <div className="git-empty">当前项目不在 Git 仓库中</div>
         ) : (
           <div className="git-columns">
-            {(['staged', 'unstaged'] as const).map((area) => (
+            {(['unstaged', 'staged'] as const).map((area) => (
               <div className="git-group" key={area}>
                 <h3>{area === 'staged' ? '已暂存' : '未暂存'}<span>{status[area].length}</span></h3>
                 <div className="git-file-list">
@@ -125,7 +114,7 @@ export default function GitChangesPanel({ folder }: { folder: string }) {
                         aria-label={`${file.path}，${label}，查看${area === 'staged' ? '已暂存' : '未暂存'}差异`}
                         onClick={() => setSelection({ area, file })}
                       >
-                        <FileIcon size={14} />
+                        <FileTypeIcon path={file.path} />
                         <span className="git-file-path">
                           <span className="git-file-name">{name}</span>
                           {directory && <span className="git-file-directory">{directory}</span>}
