@@ -28,6 +28,8 @@ pub fn run() {
             ipc::terminal_start,
             ipc::terminal_write,
             ipc::terminal_send_prompt,
+            ipc::plan_approval_status,
+            ipc::plan_approval_decide,
             ipc::terminal_attach,
             ipc::terminal_resize,
             ipc::terminal_kill,

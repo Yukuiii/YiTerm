@@ -1,5 +1,6 @@
 import {
   Component,
+  useCallback,
   useEffect,
   useMemo,
   useState,
@@ -55,6 +56,13 @@ export default function App() {
     return saved === 'work' || saved === 'code' ? saved : 'code';
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [terminalFocusTarget, setTerminalFocusTarget] = useState<string | null>(null);
+  const openTerminal = useCallback(() => {
+    if (!activeId) return;
+    setViewMode('code');
+    setTerminalFocusTarget(activeId);
+  }, [activeId]);
+  const terminalFocused = useCallback(() => setTerminalFocusTarget(null), []);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateChecker] = useState(() => createUpdateChecker(updateCheck, setUpdateInfo));
   const [newFolder, setNewFolder] = useState<string | null>(null);
@@ -312,13 +320,17 @@ export default function App() {
           {activeId ? (
             <div className={`session ${viewMode}`}>
               <div className="pane pane-chat">
-                <ChatPanel convId={activeId} />
+                <ChatPanel convId={activeId} onOpenTerminal={openTerminal} />
               </div>
               {viewMode === 'code' && (
                 <>
                   <div className="splitter" id="pane-splitter" />
                   <div className="pane pane-term">
-                    <TerminalPanel convId={activeId} />
+                    <TerminalPanel
+                    convId={activeId}
+                    focusRequested={terminalFocusTarget === activeId}
+                    onFocused={terminalFocused}
+                  />
                   </div>
                 </>
               )}

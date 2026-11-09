@@ -35,9 +35,21 @@ function applyTermOptions(
   term.options.lineHeight = Math.min(3, Math.max(0.8, lineHeight ?? DEFAULT_LINE_HEIGHT));
 }
 
-export default function TerminalPanel({ convId }: { convId: string }) {
+export default function TerminalPanel({ convId, focusRequested, onFocused }: {
+  convId: string;
+  focusRequested: boolean;
+  onFocused: () => void;
+}) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  const focusRequestedRef = useRef(focusRequested);
+  focusRequestedRef.current = focusRequested;
+  useEffect(() => {
+    if (focusRequested && termRef.current) {
+      termRef.current.focus();
+      onFocused();
+    }
+  }, [focusRequested, onFocused]);
   const fitRef = useRef<FitAddon | null>(null);
   const terminalIdRef = useRef<number | null>(null);
   const termSettings = useSettingsStore((s) => s.settings?.terminal);
@@ -107,6 +119,10 @@ export default function TerminalPanel({ convId }: { convId: string }) {
       term.open(hostRef.current!);
       termRef.current = term;
       fitRef.current = fit;
+      if (focusRequestedRef.current) {
+        term.focus();
+        onFocused();
+      }
       // Apply the latest typography after construction too: the settings store
       // can update while this async effect is still starting the PTY.
       const latest = settingsRef.current;

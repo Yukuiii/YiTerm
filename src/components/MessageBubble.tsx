@@ -3,6 +3,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import type { Msg } from '../stores/chat';
 import { oneLine } from '../format';
 import Markdown from './Markdown';
+import PlanCard, { type PlanControls } from './PlanCard';
 import { ChevronIcon, CodeIcon, FileIcon, SparkleIcon, TerminalIcon } from './Icons';
 
 const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
@@ -49,10 +50,12 @@ export default memo(function MessageBubble({
   msg,
   onRetry,
   onSendAsIs,
+  planControls,
 }: {
   msg: Msg;
   onRetry: (key: string) => void;
   onSendAsIs: (key: string, original: string) => void;
+  planControls?: PlanControls;
 }) {
   const isUser = msg.role === 'user';
 
@@ -72,22 +75,7 @@ export default memo(function MessageBubble({
   const thinking = msg.thinking?.trim() ?? '';
 
   if (isPlan && primary.trim()) {
-    return (
-      <article className="plan-card" aria-label="plan">
-        <header className="plan-card-header">
-          <FileIcon size={14} />
-          <span>plan</span>
-          {(msg.working || msg.error) && (
-            <span className="plan-card-status" role="status" title={msg.error ?? undefined}>
-              {msg.working ? '翻译中…' : '翻译失败，显示原文'}
-            </span>
-          )}
-        </header>
-        <div className="plan-card-body">
-          <Markdown>{primary}</Markdown>
-        </div>
-      </article>
-    );
+    return <PlanCard msg={msg} content={primary} controls={planControls} />;
   }
 
   // Empty body: an image turn already shows its thumbnails above; a restored

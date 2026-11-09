@@ -6,7 +6,10 @@ use tauri::{Emitter, State, ipc::Channel};
 use crate::{
     sessions::{self, Conversation, follower},
     state::AppState,
-    terminal::TerminalHandle,
+    terminal::{
+        TerminalHandle,
+        plan_approval::{PlanApprovalStatus, PlanExecutionMode, TranscriptBoundary},
+    },
     translate::{self, Direction, TranslateEvent},
 };
 
@@ -69,8 +72,14 @@ fn reclaim_idle_terminals(
         let Some((id, conv)) = pick_eviction(&snapshot, &busy, keep_conv, now) else {
             break; // everything left is busy: allow a temporary overshoot
         };
-        if let Some(handle) = state.terms.write().unwrap().remove(&id) {
-            handle.kill();
+        {
+            let mut terms = state.terms.write().unwrap();
+            if let Some(handle) = terms.get(&id) {
+                handle.retire();
+            }
+            if let Some(handle) = terms.remove(&id) {
+                handle.kill();
+            }
         }
         if let Some(c) = state.convs.write().unwrap().get_mut(&conv) {
             c.terminal_id = None;
@@ -216,6 +225,7 @@ pub async fn terminal_start(
     let evicted = reclaim_idle_terminals(&app, &state, &conv.id);
 
     let id = state.new_terminal_id();
+    let transcript_boundary = TranscriptBoundary::capture(jsonl.clone())?;
     let handle = TerminalHandle::spawn(
         id,
         conv.id.clone(),
@@ -225,6 +235,7 @@ pub async fn terminal_start(
         resumed,
         100,
         30,
+        transcript_boundary,
     )?;
     let command = handle.command.clone();
     state.terms.write().unwrap().insert(id, Arc::clone(&handle));
@@ -255,6 +266,7 @@ pub async fn terminal_start(
                 conv.imported,
                 state.busy.clone(),
                 handle.assistant_since_prompt.clone(),
+                handle.plan_approval.clone(),
             ),
         );
     }
@@ -334,18 +346,22 @@ pub fn terminal_write(
         // the clearing Escs don't re-enter this interrupt path.
         if was_busy == Some(true) && !handle.assistant_since_prompt.load(Ordering::Relaxed) {
             let clear = handle.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                // The follower can observe a reply during the delay, in which
-                // case no restored input needs clearing after all.
-                if clear.assistant_since_prompt.load(Ordering::Relaxed) {
-                    return;
-                }
-                tracing::info!(id = clear.id, "interrupt clear: esc double tap");
-                let _ = clear.write("\x1b", false);
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                let _ = clear.write("\x1b", false);
-            });
+            // Reserve before scheduling: an approval cannot cross either of
+            // these delayed writes. Subsequent direct input cancels the revision.
+            if let Ok(operation) = clear.reserve_input_operation() {
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    if clear.assistant_since_prompt.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    tracing::info!(id = clear.id, "interrupt clear: esc double tap");
+                    if clear.write_operation(&operation, "\x1b", false).is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let _ = clear.write_operation(&operation, "\x1b", false);
+                });
+            }
         }
     }
     Ok(())
@@ -371,6 +387,67 @@ pub async fn terminal_send_prompt(
         .cloned()
         .ok_or("terminal not found")?;
     handle.send_prompt(&text, &image_paths).await
+}
+
+#[tauri::command]
+pub fn plan_approval_status(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    terminal_id: u64,
+    call_id: String,
+) -> Result<PlanApprovalStatus, String> {
+    with_plan_approval_terminal(&state, &conversation_id, terminal_id, |terminal| {
+        terminal.plan_approval_status(&conversation_id, &call_id)
+    })
+}
+
+#[tauri::command]
+pub fn plan_approval_decide(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    terminal_id: u64,
+    call_id: String,
+    token: u64,
+    mode: PlanExecutionMode,
+) -> Result<(), String> {
+    with_plan_approval_terminal(&state, &conversation_id, terminal_id, |terminal| {
+        terminal.plan_approval_decide(&conversation_id, &call_id, token, mode)
+    })
+}
+
+fn plan_owner_matches(
+    conv: &Conversation,
+    terminal: &TerminalHandle,
+    conversation_id: &str,
+    terminal_id: u64,
+) -> bool {
+    conv.id == conversation_id
+        && conv.terminal_id == Some(terminal_id)
+        && conv.session_id == terminal.session_id
+        && terminal.conv_id == conversation_id
+        && terminal.id == terminal_id
+}
+
+fn with_plan_approval_terminal<T>(
+    state: &AppState,
+    conversation_id: &str,
+    terminal_id: u64,
+    f: impl FnOnce(&TerminalHandle) -> Result<T, String>,
+) -> Result<T, String> {
+    // Keep the registry and binding stable through status/decision and its
+    // single write. Reclamation retires before removing this exact handle.
+    let terms = state.terms.read().map_err(|e| e.to_string())?;
+    let terminal = terms
+        .get(&terminal_id)
+        .ok_or("终端不可用，请重新打开会话。")?;
+    let convs = state.convs.read().map_err(|e| e.to_string())?;
+    let conv = convs
+        .get(conversation_id)
+        .ok_or("会话已不存在，无法确认计划。")?;
+    if !plan_owner_matches(conv, terminal, conversation_id, terminal_id) {
+        return Err("计划所属的终端已变化，请在终端确认当前状态。".into());
+    }
+    f(terminal)
 }
 
 #[derive(Serialize)]
@@ -836,12 +913,7 @@ pub async fn translate(
 /// stream). Unknown ids are ignored.
 #[tauri::command]
 pub fn translate_cancel(state: State<'_, AppState>, request_id: String) {
-    if let Some(tx) = state
-        .translate_cancels
-        .lock()
-        .unwrap()
-        .remove(&request_id)
-    {
+    if let Some(tx) = state.translate_cancels.lock().unwrap().remove(&request_id) {
         let _ = tx.send(());
     }
 }
@@ -1021,6 +1093,31 @@ mod tests {
             exited: false,
         }];
         assert_eq!(pick_eviction(&terms, &all_busy, "new", now), None);
+    }
+
+    #[test]
+    fn plan_owner_requires_exact_registry_binding_session_and_incarnation() {
+        let (mut terminal, _) = crate::terminal::tests::mock_terminal(false);
+        let mut conv = Conversation {
+            id: "conv".into(),
+            session_id: "sess".into(),
+            terminal_id: Some(7),
+            folder: "/tmp".into(),
+            title: "mock".into(),
+            created_at: "0".into(),
+            imported: false,
+        };
+        assert!(plan_owner_matches(&conv, &terminal, "conv", 7));
+        assert!(!plan_owner_matches(&conv, &terminal, "other", 7));
+        assert!(!plan_owner_matches(&conv, &terminal, "conv", 8));
+        conv.terminal_id = Some(8);
+        assert!(!plan_owner_matches(&conv, &terminal, "conv", 7));
+        conv.terminal_id = Some(7);
+        conv.session_id = "replacement".into();
+        assert!(!plan_owner_matches(&conv, &terminal, "conv", 7));
+        conv.session_id = "sess".into();
+        terminal.conv_id = "other".into();
+        assert!(!plan_owner_matches(&conv, &terminal, "conv", 7));
     }
 
     #[test]

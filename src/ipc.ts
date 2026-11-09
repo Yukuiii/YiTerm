@@ -123,6 +123,25 @@ export const terminalResize = (id: number, cols: number, rows: number) =>
 
 export const terminalKill = (id: number) => invoke<void>('terminal_kill', { id });
 
+export type PlanExecutionMode = 'manual' | 'bypass';
+
+export interface PlanApprovalStatus {
+  available: boolean;
+  token: number | null;
+  modes: PlanExecutionMode[];
+}
+
+export const planApprovalStatus = (conversationId: string, terminalId: number, callId: string) =>
+  invoke<PlanApprovalStatus>('plan_approval_status', { conversationId, terminalId, callId });
+
+export const planApprovalDecide = (
+  conversationId: string,
+  terminalId: number,
+  callId: string,
+  token: number,
+  mode: PlanExecutionMode,
+) => invoke<void>('plan_approval_decide', { conversationId, terminalId, callId, token, mode });
+
 // ---------- conversations ----------
 
 /** YiTerm conversations plus Claude Code's projects and session transcripts. */

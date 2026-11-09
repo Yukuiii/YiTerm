@@ -11,6 +11,8 @@ import {
 } from '../ipc';
 import { useChatStore } from '../stores/chat';
 import { useTerminalsStore } from '../stores/terminals';
+import { usePlanApproval } from '../hooks/usePlanApproval';
+import { latestPlanCall } from '../planApproval';
 import MessageBubble from './MessageBubble';
 import { ArrowDownIcon, ArrowUpIcon, FileIcon, PaperclipIcon, XIcon } from './Icons';
 
@@ -37,10 +39,17 @@ function withFiles(text: string, files: string[]): string {
   return text.trim() ? `${text.trimEnd()} ${refs}` : refs;
 }
 
-export default function ChatPanel({ convId }: { convId: string }) {
+export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; onOpenTerminal: () => void }) {
   const msgs = useChatStore((s) => s.byConv[convId]) ?? [];
   const terminal = useTerminalsStore((s) => s.byConv[convId]);
   const exited = useTerminalsStore((s) => (convId in s.exited ? s.exited[convId] : undefined));
+  const latestPlan = latestPlanCall(msgs);
+  const pendingPlan = latestPlan && !latestPlan.resolved ? latestPlan : null;
+  const { state: planState, decide: decidePlan } = usePlanApproval(
+    convId, exited === undefined ? terminal?.terminalId : undefined, pendingPlan?.callId,
+  );
+  const planBlocked = !!planState.status?.available || planState.submitting || planState.sent;
+  const planControls = pendingPlan ? { state: planState, onDecision: decidePlan, onOpenTerminal } : undefined;
   const pending = useChatStore((s) => s.pendingPrompts[convId]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -121,7 +130,8 @@ export default function ChatPanel({ convId }: { convId: string }) {
     if (justSwitchedRef.current && msgs.length === 0) return;
     scrollToBottom(justSwitchedRef.current ? 'auto' : 'smooth');
     justSwitchedRef.current = false;
-  }, [msgs.length, lastMsg?.translation, lastMsg?.original]);
+  }, [msgs.length, lastMsg?.translation, lastMsg?.original, planState.status?.available,
+    planState.submitting, planState.sent, planState.error, notice]);
 
   /** Persists clipboard images and adds a removable chip for each. */
   const addPastedImages = async (picked: File[]) => {
@@ -192,6 +202,10 @@ export default function ChatPanel({ convId }: { convId: string }) {
   };
 
   const send = async (override?: string) => {
+    if (planBlocked) {
+      flashNotice('请先选择计划执行方式，或在终端提出修改意见。');
+      return;
+    }
     const text = (override ?? input).trim();
     // Only the composer's own attachments belong to this turn; `override`
     // comes from the landing-screen prompt queue, which is text-only.
@@ -222,9 +236,11 @@ export default function ChatPanel({ convId }: { convId: string }) {
     const token = ++sendTokenRef.current;
     const store = useChatStore.getState();
     let controller: AbortController | undefined;
+    let messageKey: string | undefined;
     try {
       if (hasCJK(text)) {
         const key = store.addOptimistic(convId, text, paths, filePaths);
+        messageKey = key;
         controller = new AbortController();
         sendAbortRef.current = controller;
         const en = await store.translateOutbound(convId, key, text, controller.signal);
@@ -244,6 +260,7 @@ export default function ChatPanel({ convId }: { convId: string }) {
       } else {
         const sent = withFiles(text, filePaths);
         const key = store.addPlain(convId, text, paths, filePaths);
+        messageKey = key;
         // The bubble shows the typed text; reconcile against what Claude saw.
         if (filePaths.length) store.markSent(convId, key, sent);
         sentRef.current = true;
@@ -251,11 +268,9 @@ export default function ChatPanel({ convId }: { convId: string }) {
       }
     } catch (e) {
       if (token !== sendTokenRef.current) return; // canceled; ignore the failure
-      // 翻译失败：原文已在气泡中，给出发送选项
-      const list = useChatStore.getState().byConv[convId] ?? [];
-      const last = list[list.length - 1];
-      if (last && last.role === 'user' && last.working) {
-        useChatStore.getState().setError(convId, last.key, String(e));
+      // Keep translation and rejected PTY submissions visible and retryable.
+      if (messageKey) {
+        useChatStore.getState().setError(convId, messageKey, String(e));
       }
     } finally {
       if (controller && sendAbortRef.current === controller) {
@@ -272,12 +287,12 @@ export default function ChatPanel({ convId }: { convId: string }) {
 
   // Prompt submitted from the landing screen: wait until the PTY exists.
   useEffect(() => {
-    if (!pending || exited !== undefined) return;
+    if (!pending || exited !== undefined || planBlocked) return;
     if (terminal?.terminalId === undefined) return;
     const text = useChatStore.getState().takePrompt(convId);
     if (text) void send(text);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pending, terminal?.terminalId, exited, convId]);
+  }, [pending, terminal?.terminalId, exited, convId, planBlocked]);
 
   // Esc on the chat page interrupts the running turn, mirroring the terminal.
   useEffect(() => {
@@ -327,7 +342,11 @@ export default function ChatPanel({ convId }: { convId: string }) {
     const m = (useChatStore.getState().byConv[convId] ?? []).find((x) => x.key === key);
     useChatStore.getState().setWorking(convId, key, false);
     // A failed translation must not silently drop the attachments.
-    await terminalSendPrompt(termId, withFiles(original, m?.files ?? []), m?.images ?? []);
+    try {
+      await terminalSendPrompt(termId, withFiles(original, m?.files ?? []), m?.images ?? []);
+    } catch (error) {
+      useChatStore.getState().setError(convId, key, String(error));
+    }
   }, [convId, terminal?.terminalId]);
 
   const retryTranslate = useCallback(async (key: string) => {
@@ -361,6 +380,7 @@ export default function ChatPanel({ convId }: { convId: string }) {
             msg={m}
             onRetry={retryTranslate}
             onSendAsIs={sendAsIs}
+            planControls={m.key === pendingPlan?.messageKey ? planControls : undefined}
           />
         ))}
       </div>
@@ -419,7 +439,8 @@ export default function ChatPanel({ convId }: { convId: string }) {
             value={input}
             rows={1}
             placeholder={
-              exited !== undefined ? '终端已退出' : '输入中文（Enter 发送，Shift+Enter 换行，Esc 中断）'
+              exited !== undefined ? '终端已退出' : planBlocked ? '请先选择计划执行方式（草稿会保留）'
+                : '输入中文（Enter 发送，Shift+Enter 换行，Esc 中断）'
             }
             disabled={exited !== undefined}
             onChange={(e) => setInput(e.target.value)}
@@ -435,7 +456,7 @@ export default function ChatPanel({ convId }: { convId: string }) {
             className="send-btn"
             title="发送"
             onClick={() => void send()}
-            disabled={sending || attaching > 0 || (!input.trim() && images.length === 0 && files.length === 0)}
+            disabled={planBlocked || sending || attaching > 0 || (!input.trim() && images.length === 0 && files.length === 0)}
           >
             <ArrowUpIcon size={16} />
           </button>

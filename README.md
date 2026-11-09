@@ -61,6 +61,9 @@ Claude Code is a great coding agent, but it works in English and its conversatio
   `~/.claude.json` plus existing CLI sessions are listed and resumable;
   replayed history is shown as-is, while new replies are still translated
 - **Two layouts**: Code (chat + terminal) and Work (chat only)
+- **Plan review in chat** — read the full plan and, while Claude Code's approval
+  prompt is active, execute with manual approvals or skip permission prompts for
+  the current session; open the terminal to request changes
 - **Sessions / Git sidebar views** — switch between project-grouped sessions and
   Document Review, with staged and unstaged files and file-type icons; click a file
   to open its diff, with automatic refresh and support for new files, renames,

@@ -10,6 +10,8 @@ use std::{
 use serde::Serialize;
 use tauri::Emitter;
 
+use crate::terminal::plan_approval::{FileIdentity, PlanApprovalTracker};
+
 use super::{
     ChatMsg, Role, SKIP_USER_PREFIXES, is_interrupt_marker, is_synthetic_no_response, parse_line,
 };
@@ -54,11 +56,17 @@ pub fn spawn_follower(
     imported: bool,
     busy: Arc<Mutex<HashMap<String, bool>>>,
     assistant_since_prompt: Arc<AtomicBool>,
+    plan_approval: Arc<Mutex<PlanApprovalTracker>>,
 ) -> tokio::task::JoinHandle<()> {
+    let mut file_identity = plan_approval.lock().unwrap().boundary().identity;
     tracing::info!(?path, conv_id = %conv_id, "follower started");
     tokio::spawn(async move {
         let mut last_pos: u64 = 0;
         let mut partial: Vec<u8> = Vec::new();
+        // A bounded tail detects in-place truncation/rewrite even if the file
+        // grows back past our offset between polls.
+        let mut checkpoint: Vec<u8> = Vec::new();
+        let mut last_modified = None;
         // The first batch read from an existing file is history, not live
         // activity; imported conversations use this to skip translation.
         let mut historical = true;
@@ -81,41 +89,82 @@ pub fn spawn_follower(
             tokio::time::sleep(POLL_INTERVAL).await;
 
             let Ok(meta) = tokio::fs::metadata(&path).await else {
+                if file_identity.is_some() {
+                    plan_approval.lock().unwrap().reset_transcript(0, None);
+                    file_identity = None;
+                    last_pos = 0;
+                    partial.clear();
+                    checkpoint.clear();
+                    last_modified = None;
+                    emitted.clear();
+                    historical = true;
+                    last_turn_was_user = false;
+                    last_user = None;
+                    assistant_since_prompt.store(false, Ordering::Relaxed);
+                    marked_interrupted = false;
+                }
                 continue; // normal until the first message
             };
             let len = meta.len();
-            if len < last_pos {
-                // Truncated/replaced → resnapshot everything.
-                tracing::info!(?path, "session file shrank, resnapshotting");
+            let identity = FileIdentity::of(&meta);
+            let modified = meta.modified().ok();
+            let replaced = len < last_pos || file_identity.is_some_and(|old| old != identity);
+            if !replaced && len <= last_pos && partial.is_empty() && modified == last_modified {
+                continue;
+            }
+            let read = if replaced {
+                None
+            } else {
+                match read_range(&path, last_pos, identity, &checkpoint).await {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        tracing::warn!(?path, error = %e, "session read failed");
+                        continue;
+                    }
+                }
+            };
+            let Some(read) = read else {
+                // Replaced, truncated, or the already-read tail was rewritten.
+                plan_approval
+                    .lock()
+                    .unwrap()
+                    .reset_transcript(len, Some(identity));
+                tracing::info!(?path, "session file changed, resnapshotting");
+                file_identity = Some(identity);
                 last_pos = 0;
                 partial.clear();
+                checkpoint.clear();
+                last_modified = None;
                 emitted.clear();
                 historical = true;
                 last_turn_was_user = false;
                 last_user = None;
                 assistant_since_prompt.store(false, Ordering::Relaxed);
                 marked_interrupted = false;
-            }
-            if len <= last_pos && partial.is_empty() {
                 continue;
-            }
-
-            let read = match read_range(&path, last_pos).await {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    tracing::warn!(?path, error = %e, "session read failed");
-                    continue;
-                }
             };
+            file_identity = Some(identity);
+            last_modified = modified;
+            let partial_start = last_pos - partial.len() as u64;
             last_pos += read.len() as u64;
             if read.is_empty() {
                 continue;
+            }
+            if read.len() >= 64 {
+                checkpoint.clear();
+                checkpoint.extend_from_slice(&read[read.len() - 64..]);
+            } else {
+                checkpoint.extend_from_slice(&read);
+                if checkpoint.len() > 64 {
+                    checkpoint.drain(..checkpoint.len() - 64);
+                }
             }
             partial.extend_from_slice(&read);
 
             let mut upserts: Vec<ChatMsg> = Vec::new();
             let mut consumed = 0;
             for line in complete_lines(&partial) {
+                let record_start = partial_start + consumed as u64;
                 consumed += line.len() + 1; // include the newline
                 if line.is_empty() {
                     continue;
@@ -126,6 +175,12 @@ pub fn spawn_follower(
                 };
                 let state = turn_state(&v);
                 let parsed = parse_line(&v);
+                plan_approval.lock().unwrap().observe_record(
+                    &v,
+                    &parsed,
+                    record_start,
+                    partial_start + consumed as u64,
+                );
                 let is_user_prompt = state == Some(true)
                     && v.get("type").and_then(serde_json::Value::as_str) == Some("user");
                 if is_user_prompt {
@@ -349,19 +404,80 @@ fn turn_state(v: &serde_json::Value) -> Option<bool> {
     }
 }
 
-async fn read_range(path: &std::path::Path, start: u64) -> Result<Vec<u8>, std::io::Error> {
+async fn read_range(
+    path: &std::path::Path,
+    start: u64,
+    expected_identity: FileIdentity,
+    checkpoint: &[u8],
+) -> Result<Option<Vec<u8>>, std::io::Error> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let mut f = tokio::fs::File::open(path).await?;
-    f.seek(std::io::SeekFrom::Start(start)).await?;
+    let meta = f.metadata().await?;
+    if FileIdentity::of(&meta) != expected_identity || meta.len() < start {
+        return Ok(None);
+    }
+    f.seek(std::io::SeekFrom::Start(start - checkpoint.len() as u64))
+        .await?;
+    let mut previous = vec![0; checkpoint.len()];
+    if let Err(e) = f.read_exact(&mut previous).await {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            return Ok(None);
+        }
+        return Err(e);
+    }
+    if previous != checkpoint {
+        return Ok(None);
+    }
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).await?;
-    Ok(buf)
+    Ok(Some(buf))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn transcript_checkpoint_detects_replacement_and_in_place_rewrite() {
+        let path =
+            std::env::temp_dir().join(format!("yiterm-follower-{}.jsonl", uuid::Uuid::new_v4()));
+        let replacement = path.with_extension("replacement");
+        std::fs::write(&path, b"old record\n").unwrap();
+        let identity = FileIdentity::of(&std::fs::metadata(&path).unwrap());
+        assert_eq!(
+            read_range(&path, 0, identity, b"").await.unwrap().unwrap(),
+            b"old record\n"
+        );
+        std::fs::write(&path, b"old record\nnew record\n").unwrap();
+        assert_eq!(
+            read_range(&path, 11, identity, b"old record\n")
+                .await
+                .unwrap()
+                .unwrap(),
+            b"new record\n"
+        );
+        // Same inode and longer than our old offset: a length-only check misses it.
+        std::fs::write(&path, b"rewritten!\nnew record\n").unwrap();
+        assert!(
+            read_range(&path, 11, identity, b"old record\n")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(&replacement, b"replacement\n").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert!(read_range(&path, 0, identity, b"").await.unwrap().is_none());
+        let identity = FileIdentity::of(&std::fs::metadata(&path).unwrap());
+        std::fs::write(&path, b"").unwrap();
+        assert!(
+            read_range(&path, 11, identity, b"old record\n")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn complete_lines_preserve_partial_records_across_reads() {

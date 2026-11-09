@@ -1,4 +1,5 @@
 pub mod buffer;
+pub mod plan_approval;
 
 use std::{
     io::{Read, Write},
@@ -14,7 +15,13 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::ipc::Channel;
 
-use self::buffer::Backlog;
+use self::{
+    buffer::Backlog,
+    plan_approval::{
+        InputOperation, PlanApprovalStatus, PlanApprovalTracker, PlanExecutionMode,
+        TranscriptBoundary,
+    },
+};
 
 const RING_CAP: usize = 1024 * 1024; // 1 MiB backlog
 const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
@@ -56,6 +63,7 @@ pub struct TerminalHandle {
     pub exited: Mutex<bool>,
     /// Shared with the transcript follower; thinking and tool calls count as replies.
     pub assistant_since_prompt: Arc<AtomicBool>,
+    pub plan_approval: Arc<Mutex<PlanApprovalTracker>>,
     /// When the PTY last produced output (unix millis). The idle-terminal
     /// reclaimer treats recent output as "still running".
     last_output_ms: AtomicI64,
@@ -82,7 +90,16 @@ impl TerminalHandle {
         resume: bool,
         cols: u16,
         rows: u16,
+        transcript_boundary: TranscriptBoundary,
     ) -> Result<Arc<Self>, String> {
+        let plan_approval = Arc::new(Mutex::new(PlanApprovalTracker::new(
+            conv_id.clone(),
+            session_id.clone(),
+            id,
+            transcript_boundary,
+            rows,
+            cols,
+        )));
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -155,6 +172,7 @@ impl TerminalHandle {
             started_at_ms,
             exited: Mutex::new(false),
             assistant_since_prompt: Arc::new(AtomicBool::new(false)),
+            plan_approval,
             last_output_ms: AtomicI64::new(chrono_millis()),
             backlog: Mutex::new(Backlog::new(RING_CAP)),
             subs: Mutex::new(Vec::new()),
@@ -172,15 +190,81 @@ impl TerminalHandle {
     /// Claude Code only turns a pasted image *path* into a real `[Image #N]`
     /// attachment inside its paste handler — the same path arriving as typed
     /// keys is left as literal text. So image paths must use this, not `write`.
+    #[allow(dead_code)] // Raw paste entry point; the composer uses its reservation.
     pub fn paste(&self, text: &str) -> Result<(), String> {
-        if *self.exited.lock().map_err(|e| e.to_string())? {
-            return Err("terminal exited".into());
+        self.write_bytes(&bracketed_paste(text), None)
+    }
+
+    pub fn reserve_input_operation(&self) -> Result<InputOperation, String> {
+        InputOperation::begin(self.plan_approval.clone())
+    }
+
+    /// Lock order for all input, approval, resize and retirement is tracker
+    /// before writer/master. Reservations carry only a revision across awaits.
+    fn write_bytes(&self, bytes: &[u8], operation: Option<&InputOperation>) -> Result<(), String> {
+        let mut tracker = self.plan_approval.lock().map_err(|e| e.to_string())?;
+        if let Some(operation) = operation {
+            operation.validate(&tracker)?;
+        } else {
+            if self.is_exited() {
+                return Err("terminal exited".into());
+            }
+            tracker.invalidate_input();
         }
         let mut guard = self.writer.lock().map_err(|e| e.to_string())?;
         let w = guard.as_mut().ok_or("terminal closed")?;
-        w.write_all(&bracketed_paste(text))
+        w.write_all(bytes)
             .and_then(|_| w.flush())
-            .map_err(|e| format!("pty paste: {e}"))
+            .map_err(|e| format!("pty write: {e}"))
+    }
+
+    pub fn write_operation(
+        &self,
+        operation: &InputOperation,
+        text: &str,
+        submit: bool,
+    ) -> Result<(), String> {
+        let mut bytes = text.as_bytes().to_vec();
+        if submit {
+            bytes.push(b'\r');
+        }
+        self.write_bytes(&bytes, Some(operation))
+    }
+
+    pub fn plan_approval_status(
+        &self,
+        conv_id: &str,
+        call_id: &str,
+    ) -> Result<PlanApprovalStatus, String> {
+        self.plan_approval
+            .lock()
+            .map_err(|e| e.to_string())?
+            .status(conv_id, &self.session_id, self.id, call_id)
+    }
+
+    pub fn plan_approval_decide(
+        &self,
+        conv_id: &str,
+        call_id: &str,
+        token: u64,
+        mode: PlanExecutionMode,
+    ) -> Result<(), String> {
+        let mut tracker = self.plan_approval.lock().map_err(|e| e.to_string())?;
+        let mut writer = self.writer.lock().map_err(|e| e.to_string())?;
+        let writer = writer.as_mut().ok_or("terminal closed")?;
+        let digit = tracker.consume(conv_id, &self.session_id, self.id, call_id, token, mode)?;
+        // A receipt only: the matching transcript result settles approval.
+        writer
+            .write_all(&[digit])
+            .and_then(|_| writer.flush())
+            .map_err(|e| format!("pty approval write: {e}"))
+    }
+
+    pub fn retire(&self) {
+        self.plan_approval
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retire();
     }
 
     /// Sends one composer turn: optional text plus zero or more image paths.
@@ -192,17 +276,21 @@ impl TerminalHandle {
     /// the `[Image #N]` marker to come back on the PTY, then type the text and
     /// press Enter through `submit_text`.
     pub async fn send_prompt(&self, text: &str, image_paths: &[String]) -> Result<(), String> {
+        let operation = self.reserve_input_operation()?;
         if image_paths.is_empty() {
-            return self.submit_text(text).await;
+            return self.submit_text(&operation, text).await;
         }
         let baseline = self.backlog.lock().map_err(|e| e.to_string())?.written();
-        self.paste(&image_paths.join("\n"))?;
-        if !self.wait_for_image_attach(baseline, IMAGE_ATTACH_TIMEOUT).await {
+        self.write_bytes(&bracketed_paste(&image_paths.join("\n")), Some(&operation))?;
+        if !self
+            .wait_for_image_attach(baseline, IMAGE_ATTACH_TIMEOUT)
+            .await
+        {
             // Still submit: the path is in Claude's input either way and it can
             // read the file itself. Stranding the turn would be worse.
             tracing::warn!(target: "yiterm", "image attach marker not seen; submitting anyway");
         }
-        self.submit_text(text).await
+        self.submit_text(&operation, text).await
     }
 
     /// Types `text`, then presses Enter. A text burst is processed like a
@@ -210,10 +298,10 @@ impl TerminalHandle {
     /// an Enter in the same burst is swallowed — the prompt then just sits in
     /// the input box. Write the text first, let the TUI settle, and press
     /// Enter separately.
-    async fn submit_text(&self, text: &str) -> Result<(), String> {
-        self.write(text, false)?;
+    async fn submit_text(&self, operation: &InputOperation, text: &str) -> Result<(), String> {
+        self.write_operation(operation, text, false)?;
         tokio::time::sleep(ENTER_SETTLE).await;
-        self.write("", true)
+        self.write_operation(operation, "", true)
     }
 
     /// Polls the backlog for the attachment marker rendered after a paste.
@@ -243,24 +331,15 @@ impl TerminalHandle {
 
     /// Writes text to the PTY; `submit` appends `\r` (presses Enter).
     pub fn write(&self, text: &str, submit: bool) -> Result<(), String> {
-        if *self.exited.lock().map_err(|e| e.to_string())? {
-            return Err("terminal exited".into());
+        let mut bytes = text.as_bytes().to_vec();
+        if submit {
+            bytes.push(b'\r');
         }
-        let mut guard = self.writer.lock().map_err(|e| e.to_string())?;
-        let w = guard.as_mut().ok_or("terminal closed")?;
-        w.write_all(text.as_bytes())
-            .and_then(|_| {
-                if submit {
-                    w.write_all(b"\r")
-                } else {
-                    Ok(())
-                }
-            })
-            .and_then(|_| w.flush())
-            .map_err(|e| format!("pty write: {e}"))
+        self.write_bytes(&bytes, None)
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
+        let mut tracker = self.plan_approval.lock().map_err(|e| e.to_string())?;
         let guard = self.master.lock().map_err(|e| e.to_string())?;
         let m = guard.as_ref().ok_or("terminal closed")?;
         m.resize(PtySize {
@@ -269,10 +348,16 @@ impl TerminalHandle {
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(|e| format!("pty resize: {e}"))
+        .map_err(|e| format!("pty resize: {e}"))?;
+        tracker.resize(rows, cols);
+        Ok(())
     }
 
     pub fn kill(&self) {
+        self.retire();
+        if let Ok(mut exited) = self.exited.lock() {
+            *exited = true;
+        }
         if let Ok(mut guard) = self.child.lock() {
             if let Some(child) = guard.as_mut() {
                 let _ = child.kill();
@@ -290,10 +375,10 @@ impl TerminalHandle {
     }
 
     pub fn exit_code(&self) -> Option<Option<i32>> {
-        self.child
-            .lock()
-            .ok()
-            .and_then(|mut g| g.as_mut().map(|c| c.wait().ok().map(|s| s.exit_code() as i32)))
+        self.child.lock().ok().and_then(|mut g| {
+            g.as_mut()
+                .map(|c| c.wait().ok().map(|s| s.exit_code() as i32))
+        })
     }
 
     /// Replay the backlog into `channel` then subscribe it for live data.
@@ -321,7 +406,8 @@ impl TerminalHandle {
     }
 
     fn append_and_broadcast(&self, bytes: &[u8]) {
-        self.last_output_ms.store(chrono_millis(), Ordering::Relaxed);
+        self.last_output_ms
+            .store(chrono_millis(), Ordering::Relaxed);
         // Caller holds `subs` lock; lock order is always subs → backlog.
         let mut subs = self.subs.lock().unwrap();
         let seq = {
@@ -341,6 +427,7 @@ impl TerminalHandle {
     }
 
     fn broadcast_exit(&self, code: Option<i32>) {
+        self.retire();
         if let Ok(mut exited) = self.exited.lock() {
             *exited = true;
         }
@@ -425,12 +512,18 @@ fn chrono_millis() -> i64 {
 /// before appending to the ring and broadcasting to subscribers.
 fn spawn_reader_thread(handle: Arc<TerminalHandle>, mut reader: Box<dyn Read + Send>) {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let ingest = handle.clone();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    ingest
+                        .plan_approval
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .feed_output(&buf[..n]);
                     if tx.send(buf[..n].to_vec()).is_err() {
                         break;
                     }
@@ -439,6 +532,9 @@ fn spawn_reader_thread(handle: Arc<TerminalHandle>, mut reader: Box<dyn Read + S
                 Err(_) => break,
             }
         }
+        // Retire immediately at EOF, before the flusher drains or waits for
+        // the process. Cloned old handles can no longer send an approval.
+        ingest.retire();
         // Dropping tx closes the channel → flusher drains and exits.
     });
 
@@ -475,8 +571,238 @@ fn spawn_reader_thread(handle: Arc<TerminalHandle>, mut reader: Box<dyn Read + S
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use super::plan_approval::tests::{call, menu_bytes, observe, tracker};
     use super::*;
+
+    pub(crate) type Writes = Arc<Mutex<Vec<Vec<u8>>>>;
+
+    struct RecordingWriter {
+        writes: Writes,
+        fail: bool,
+    }
+    impl Write for RecordingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.writes.lock().unwrap().push(bytes.to_vec());
+            if self.fail {
+                return Err(std::io::Error::other("mock write failure"));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn mock_terminal(fail: bool) -> (TerminalHandle, Writes) {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        (
+            TerminalHandle {
+                id: 7,
+                conv_id: "conv".into(),
+                session_id: "sess".into(),
+                folder: "/tmp".into(),
+                command: "mock".into(),
+                started_at_ms: 0,
+                exited: Mutex::new(false),
+                assistant_since_prompt: Arc::new(AtomicBool::new(false)),
+                plan_approval: Arc::new(Mutex::new(tracker())),
+                last_output_ms: AtomicI64::new(0),
+                backlog: Mutex::new(Backlog::new(RING_CAP)),
+                subs: Mutex::new(Vec::new()),
+                writer: Mutex::new(Some(Box::new(RecordingWriter {
+                    writes: writes.clone(),
+                    fail,
+                }))),
+                master: Mutex::new(None),
+                child: Mutex::new(None),
+            },
+            writes,
+        )
+    }
+
+    fn ready(t: &TerminalHandle, optional: bool) -> u64 {
+        let mut tracker = t.plan_approval.lock().unwrap();
+        observe(&mut tracker, &call("approval"), 101);
+        tracker.feed_output(&menu_bytes(optional));
+        tracker
+            .status("conv", "sess", 7, "approval")
+            .unwrap()
+            .token
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn approval_writes_exact_mapped_digit_once_with_no_enter() {
+        for (optional, mode, expected) in [
+            (false, PlanExecutionMode::Manual, b'2'),
+            (false, PlanExecutionMode::Bypass, b'1'),
+            (true, PlanExecutionMode::Manual, b'3'),
+            (true, PlanExecutionMode::Bypass, b'2'),
+        ] {
+            let (terminal, writes) = mock_terminal(false);
+            let token = ready(&terminal, optional);
+            terminal
+                .plan_approval_decide("conv", "approval", token, mode)
+                .unwrap();
+            assert_eq!(*writes.lock().unwrap(), vec![vec![expected]]);
+            assert!(
+                !terminal
+                    .plan_approval_status("conv", "approval")
+                    .unwrap()
+                    .available
+            );
+            assert!(
+                terminal
+                    .plan_approval_decide("conv", "approval", token, mode)
+                    .is_err()
+            );
+            assert_eq!(writes.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn simultaneous_decisions_consume_one_claim_and_write_one_digit() {
+        let (terminal, writes) = mock_terminal(false);
+        let terminal = Arc::new(terminal);
+        let token = ready(&terminal, false);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let workers: Vec<_> = [PlanExecutionMode::Manual, PlanExecutionMode::Bypass]
+            .into_iter()
+            .map(|mode| {
+                let terminal = terminal.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    terminal.plan_approval_decide("conv", "approval", token, mode)
+                })
+            })
+            .collect();
+        barrier.wait();
+        let succeeded = workers
+            .into_iter()
+            .map(|w| w.join().unwrap())
+            .filter(Result::is_ok)
+            .count();
+        assert_eq!(succeeded, 1);
+        let writes = writes.lock().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert!(writes[0] == b"1" || writes[0] == b"2");
+    }
+
+    #[test]
+    fn failed_pty_resize_does_not_mutate_the_vt_screen_or_token() {
+        let (terminal, _) = mock_terminal(false);
+        let token = ready(&terminal, false);
+        assert!(terminal.resize(10, 2).is_err());
+        assert_eq!(
+            terminal
+                .plan_approval_status("conv", "approval")
+                .unwrap()
+                .token,
+            Some(token)
+        );
+    }
+
+    #[test]
+    fn write_failure_consumes_claim_without_reporting_approval() {
+        let (terminal, writes) = mock_terminal(true);
+        let token = ready(&terminal, false);
+        assert!(
+            terminal
+                .plan_approval_decide("conv", "approval", token, PlanExecutionMode::Manual)
+                .is_err()
+        );
+        assert!(
+            terminal
+                .plan_approval_decide("conv", "approval", token, PlanExecutionMode::Manual)
+                .is_err()
+        );
+        assert_eq!(writes.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn raw_write_paste_and_retirement_make_prior_claim_unusable() {
+        for action in 0..4 {
+            let (terminal, writes) = mock_terminal(false);
+            let token = ready(&terminal, false);
+            match action {
+                0 => terminal.write("3", false).unwrap(),
+                1 => terminal.paste("feedback").unwrap(),
+                2 => terminal.kill(),
+                _ => terminal.broadcast_exit(Some(0)),
+            }
+            let before = writes.lock().unwrap().clone();
+            assert!(
+                terminal
+                    .plan_approval_decide("conv", "approval", token, PlanExecutionMode::Manual)
+                    .is_err()
+            );
+            assert_eq!(*writes.lock().unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn composer_rejects_confirmed_approval_before_any_text_or_image_write() {
+        for paths in [vec![], vec!["/tmp/mock.png".into()]] {
+            let (terminal, writes) = mock_terminal(false);
+            ready(&terminal, false);
+            assert!(terminal.send_prompt("do not write", &paths).await.is_err());
+            assert!(writes.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn focused_feedback_disables_decisions_and_still_blocks_composer() {
+        for feedback in ["Tell Claude what to change", "feedback already entered"] {
+            let (terminal, writes) = mock_terminal(false);
+            let bytes = String::from_utf8(menu_bytes(false))
+                .unwrap()
+                .replace("❯ 1.", "  1.")
+                .replace(
+                    "  3. Tell Claude what to change",
+                    &format!("❯ 3. {feedback}"),
+                );
+            {
+                let mut tracker = terminal.plan_approval.lock().unwrap();
+                observe(&mut tracker, &call("approval"), 101);
+                tracker.feed_output(bytes.as_bytes());
+            }
+            assert!(
+                !terminal
+                    .plan_approval_status("conv", "approval")
+                    .unwrap()
+                    .available
+            );
+            assert!(terminal.send_prompt("not feedback", &[]).await.is_err());
+            assert!(writes.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn menu_during_composer_settle_blocks_both_approval_and_delayed_enter() {
+        let (terminal, writes) = mock_terminal(false);
+        let (sent, ()) = tokio::join!(terminal.send_prompt("draft", &[]), async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let token = ready(&terminal, false);
+            assert!(
+                terminal
+                    .plan_approval_decide("conv", "approval", token, PlanExecutionMode::Manual)
+                    .is_err()
+            );
+        });
+        assert!(sent.is_err());
+        assert_eq!(*writes.lock().unwrap(), vec![b"draft".to_vec()]);
+    }
+
+    #[test]
+    fn delayed_escape_reservation_is_cancelled_by_raw_input() {
+        let (terminal, writes) = mock_terminal(false);
+        let operation = terminal.reserve_input_operation().unwrap();
+        terminal.write("x", false).unwrap();
+        assert!(terminal.write_operation(&operation, "\x1b", false).is_err());
+        assert_eq!(*writes.lock().unwrap(), vec![b"x".to_vec()]);
+    }
 
     #[test]
     fn paste_frames_without_submitting() {
@@ -519,6 +845,8 @@ mod tests {
         // space render match.
         assert!(image_attach_marker(b"[Image #1]"));
         assert!(image_attach_marker(b"[Image#2]"));
-        assert!(image_attach_marker(b"prefix\x1b[2K[Image\x1b[10G#12]suffix"));
+        assert!(image_attach_marker(
+            b"prefix\x1b[2K[Image\x1b[10G#12]suffix"
+        ));
     }
 }
