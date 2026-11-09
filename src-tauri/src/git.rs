@@ -34,6 +34,7 @@ pub struct GitFileChange {
 #[serde(rename_all = "camelCase")]
 pub struct GitStatus {
     root: Option<String>,
+    branch: Option<String>,
     staged: Vec<GitFileChange>,
     unstaged: Vec<GitFileChange>,
 }
@@ -289,9 +290,30 @@ fn status_path(bytes: &[u8]) -> Result<String, String> {
     Ok(path.to_owned())
 }
 
+fn parse_branch(header: &[u8]) -> Result<Option<String>, String> {
+    let header = std::str::from_utf8(header)
+        .map_err(|_| "Git 分支名称包含无法通过 UTF-8 传输的字符。".to_owned())?;
+    if header == "HEAD (no branch)" {
+        return Ok(None);
+    }
+    let head = header
+        .strip_prefix("No commits yet on ")
+        .or_else(|| header.strip_prefix("Initial commit on "))
+        .unwrap_or(header);
+    // Branch names cannot contain '..' or ASCII spaces. Drop upstream and
+    // ahead/behind information without splitting valid Unicode whitespace.
+    let branch = head.split("...").next().unwrap_or(head);
+    let branch = branch.split(' ').next().unwrap_or(branch);
+    if branch.is_empty() {
+        return Err("Git 返回了无效的分支名称。".to_owned());
+    }
+    Ok(Some(branch.to_owned()))
+}
+
 fn parse_status(bytes: &[u8], root: String) -> Result<GitStatus, String> {
     let mut result = GitStatus {
         root: Some(root),
+        branch: None,
         staged: Vec::new(),
         unstaged: Vec::new(),
     };
@@ -305,6 +327,10 @@ fn parse_status(bytes: &[u8], root: String) -> Result<GitStatus, String> {
         }
         if record.len() < 4 || record[2] != b' ' || !bytes.ends_with(&[0]) {
             return Err("Git 返回了无效的状态记录。".to_owned());
+        }
+        if let Some(header) = record.strip_prefix(b"## ") {
+            result.branch = parse_branch(header)?;
+            continue;
         }
         let x = record[0];
         let y = record[1];
@@ -349,6 +375,7 @@ fn status_in(folder: &Path) -> Result<GitStatus, String> {
     let Some(root) = repository_root(folder)? else {
         return Ok(GitStatus {
             root: None,
+            branch: None,
             staged: Vec::new(),
             unstaged: Vec::new(),
         });
@@ -357,6 +384,8 @@ fn status_in(folder: &Path) -> Result<GitStatus, String> {
         git_command(Path::new(&root)).args([
             "status",
             "--porcelain=v1",
+            "--branch",
+            "--no-ahead-behind",
             "-z",
             "--untracked-files=all",
             "--renames",
@@ -535,6 +564,61 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn branch_headers_preserve_names_without_tracking_metadata() {
+        for (header, expected) in [
+            ("main", Some("main")),
+            ("main...origin/main [ahead 2, behind 1]", Some("main")),
+            (
+                "feature/review...origin/feature/review [gone]",
+                Some("feature/review"),
+            ),
+            ("No commits yet on feature/new", Some("feature/new")),
+            ("Initial commit on legacy", Some("legacy")),
+            (
+                "feature/中文\u{00a0}branch",
+                Some("feature/中文\u{00a0}branch"),
+            ),
+            ("HEAD (no branch)", None),
+        ] {
+            let raw = format!("## {header}\0?? file.txt\0");
+            let status = parse_status(raw.as_bytes(), "/repo".to_owned()).unwrap();
+            assert_eq!(status.branch.as_deref(), expected, "{header}");
+            assert_eq!(status.unstaged[0].path, "file.txt");
+        }
+        assert!(parse_branch(b"invalid\xff").is_err());
+        assert!(parse_branch(b"No commits yet on ").is_err());
+    }
+
+    #[test]
+    fn branch_status_tracks_unborn_tracking_and_detached_heads() {
+        let repo = TempRepo::new();
+        assert_eq!(repo.status().branch.as_deref(), Some("main"));
+        repo.write("file.txt", "base\n");
+        repo.commit();
+        repo.git(&["remote", "add", "origin", "."]);
+        repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        repo.git(&["branch", "--set-upstream-to=origin/main", "main"]);
+        let tracking = repo.status();
+        assert_eq!(tracking.branch.as_deref(), Some("main"));
+        assert_eq!(serde_json::to_value(&tracking).unwrap()["branch"], "main");
+
+        repo.git(&["checkout", "-b", "feature/branch-footer"]);
+        assert_eq!(
+            repo.status().branch.as_deref(),
+            Some("feature/branch-footer")
+        );
+        repo.git(&["checkout", "--detach", "HEAD"]);
+        let detached = repo.status();
+        assert!(detached.root.is_some());
+        assert!(detached.branch.is_none());
+        assert!(serde_json::to_value(&detached).unwrap()["branch"].is_null());
+
+        let plain = TempRepo::directory().status();
+        assert!(plain.root.is_none());
+        assert!(plain.branch.is_none());
     }
 
     #[test]

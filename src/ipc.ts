@@ -144,6 +144,8 @@ export interface GitFileChange {
 
 export interface GitStatus {
   root: string | null;
+  /** Null for a detached HEAD or a folder outside a repository. */
+  branch: string | null;
   staged: GitFileChange[];
   unstaged: GitFileChange[];
 }

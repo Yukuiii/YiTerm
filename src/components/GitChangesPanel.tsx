@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { gitStatus, type GitArea, type GitFileChange, type GitStatus } from '../ipc';
 import GitDiffDialog from './GitDiffDialog';
 import FileTypeIcon from './FileTypeIcon';
-import { ChevronIcon } from './Icons';
+import { ChevronIcon, GitBranchIcon } from './Icons';
 
 const STATUS_LABELS: Record<string, string> = {
   A: '新增', M: '修改', D: '删除', R: '重命名', C: '复制',
@@ -70,6 +70,7 @@ export default function GitChangesPanel({ folder }: { folder: string }) {
   }, [collapsed]);
 
   const total = status ? status.staged.length + status.unstaged.length : 0;
+  const branch = status?.branch ?? 'Detached HEAD';
   const selectedFile = selection && status?.[selection.area].find(
     (file) => file.path === selection.file.path,
   );
@@ -128,6 +129,12 @@ export default function GitChangesPanel({ folder }: { folder: string }) {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+        {status?.root && (
+          <div className="git-panel-branch" role="status" aria-label={`当前分支：${branch}`} title={branch}>
+            <GitBranchIcon size={14} />
+            <span>{branch}</span>
           </div>
         )}
       </div>
