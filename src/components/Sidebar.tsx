@@ -255,8 +255,16 @@ export default function Sidebar({
             return (
               <div className="project" key={g.folder}>
                 <div className="project-row">
-                  <button className="project-toggle" onClick={() => toggleFolder(g.folder, open)} title={g.folder}>
-                    <ChevronIcon size={13} className={`chevron ${open ? 'open' : ''}`} />
+                  <button
+                    className="project-toggle"
+                    aria-expanded={open}
+                    onClick={() => toggleFolder(g.folder, open)}
+                    title={g.folder}
+                  >
+                    <span className="project-icon" aria-hidden="true">
+                      <FolderIcon size={14} />
+                      <ChevronIcon size={13} className={`chevron ${open ? 'open' : ''}`} />
+                    </span>
                     <span className="project-name">{g.name}</span>
                   </button>
                   <button

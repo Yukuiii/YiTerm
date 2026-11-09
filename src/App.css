@@ -321,6 +321,19 @@ button, input, textarea { font-family: inherit; }
   text-align: left;
 }
 
+.project-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  display: grid;
+  place-items: center;
+  color: var(--fg-muted);
+}
+.project-icon > svg { grid-area: 1 / 1; }
+.project-icon .chevron { opacity: 0; }
+.project-row:hover .project-icon > svg:first-child { opacity: 0; }
+.project-row:hover .project-icon .chevron { opacity: 1; }
+
 .chevron { color: #777; flex: none; transition: transform 0.14s ease; }
 .chevron.open { transform: rotate(90deg); }
 
