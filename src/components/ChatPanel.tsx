@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import {
@@ -321,16 +321,16 @@ export default function ChatPanel({ convId }: { convId: string }) {
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [convId]);
 
-  const sendAsIs = async (key: string, original: string) => {
+  const sendAsIs = useCallback(async (key: string, original: string) => {
     const termId = terminal?.terminalId;
     if (termId === undefined) return;
     const m = (useChatStore.getState().byConv[convId] ?? []).find((x) => x.key === key);
     useChatStore.getState().setWorking(convId, key, false);
     // A failed translation must not silently drop the attachments.
     await terminalSendPrompt(termId, withFiles(original, m?.files ?? []), m?.images ?? []);
-  };
+  }, [convId, terminal?.terminalId]);
 
-  const retryTranslate = async (key: string) => {
+  const retryTranslate = useCallback(async (key: string) => {
     const m = (useChatStore.getState().byConv[convId] ?? []).find((x) => x.key === key);
     if (!m) return;
     useChatStore.getState().setWorking(convId, key, true);
@@ -343,7 +343,7 @@ export default function ChatPanel({ convId }: { convId: string }) {
     } catch (e) {
       useChatStore.getState().setError(convId, key, String(e));
     }
-  };
+  }, [convId, terminal?.terminalId]);
 
   return (
     <div className="chat-panel">
@@ -359,8 +359,8 @@ export default function ChatPanel({ convId }: { convId: string }) {
           <MessageBubble
             key={m.key}
             msg={m}
-            onRetry={() => void retryTranslate(m.key)}
-            onSendAsIs={() => void sendAsIs(m.key, m.original)}
+            onRetry={retryTranslate}
+            onSendAsIs={sendAsIs}
           />
         ))}
       </div>

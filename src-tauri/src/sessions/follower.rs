@@ -11,7 +11,7 @@ use serde::Serialize;
 use tauri::Emitter;
 
 use super::{
-    is_interrupt_marker, is_synthetic_no_response, parse_line, ChatMsg, Role, SKIP_USER_PREFIXES,
+    ChatMsg, Role, SKIP_USER_PREFIXES, is_interrupt_marker, is_synthetic_no_response, parse_line,
 };
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
@@ -114,9 +114,9 @@ pub fn spawn_follower(
             partial.extend_from_slice(&read);
 
             let mut upserts: Vec<ChatMsg> = Vec::new();
-            while let Some(pos) = partial.iter().position(|&b| b == b'\n') {
-                let line: Vec<u8> = partial.drain(..=pos).collect();
-                let line = &line[..line.len() - 1]; // strip \n
+            let mut consumed = 0;
+            for line in complete_lines(&partial) {
+                consumed += line.len() + 1; // include the newline
                 if line.is_empty() {
                     continue;
                 }
@@ -132,7 +132,7 @@ pub fn spawn_follower(
                     last_user = parsed.iter().find(|m| m.role == Role::User).cloned();
                     marked_interrupted = false;
                 }
-                record_assistant_progress(&v, &assistant_since_prompt);
+                record_assistant_progress(&v, state, &assistant_since_prompt);
 
                 // An interrupt before any assistant line leaves no reply: mark
                 // the prompt so the chat can say "已中断" instead of showing a
@@ -154,8 +154,7 @@ pub fn spawn_follower(
                 }
 
                 if let Some(running) = state {
-                    last_turn_was_user = running
-                        && v.get("type").and_then(serde_json::Value::as_str) == Some("user");
+                    last_turn_was_user = is_user_prompt;
                     let changed = {
                         let mut map = busy.lock().unwrap();
                         let prev = map.insert(conv_id.clone(), running);
@@ -182,6 +181,7 @@ pub fn spawn_follower(
                     }
                 }
             }
+            partial.drain(..consumed);
 
             if !live {
                 // A replayed turn that ends on a user prompt with no assistant
@@ -235,6 +235,14 @@ pub fn spawn_follower(
     })
 }
 
+/// Borrow complete JSONL records without their newline; retain any unfinished
+/// final record for the next poll.
+fn complete_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    bytes
+        .split_inclusive(|&b| b == b'\n')
+        .filter_map(|line| line.strip_suffix(b"\n"))
+}
+
 /// Text fragments of a user message: a plain string counts as one fragment,
 /// an array contributes the `text` of its content blocks, and anything else
 /// contributes none. Claude Code writes interrupt markers both ways.
@@ -252,15 +260,22 @@ fn message_texts(content: &serde_json::Value) -> Vec<&str> {
 /// True when the line is Claude Code's interrupt marker for the turn.
 fn has_interrupt_marker(v: &serde_json::Value) -> bool {
     v.get("type").and_then(serde_json::Value::as_str) == Some("user")
-        && v.pointer("/message/content")
-            .is_some_and(|content| message_texts(content).iter().any(|t| is_interrupt_marker(t)))
+        && v.pointer("/message/content").is_some_and(|content| {
+            message_texts(content)
+                .iter()
+                .any(|t| is_interrupt_marker(t))
+        })
 }
 
 /// Track the first real assistant record in each main-session turn. Tool
 /// results, local commands and synthetic replies must not reset this progress.
-fn record_assistant_progress(v: &serde_json::Value, assistant_since_prompt: &AtomicBool) {
+fn record_assistant_progress(
+    v: &serde_json::Value,
+    state: Option<bool>,
+    assistant_since_prompt: &AtomicBool,
+) {
     match v.get("type").and_then(serde_json::Value::as_str) {
-        Some("user") if turn_state(v) == Some(true) => {
+        Some("user") if state == Some(true) => {
             assistant_since_prompt.store(false, Ordering::Relaxed);
         }
         Some("assistant")
@@ -323,9 +338,9 @@ fn turn_state(v: &serde_json::Value) -> Option<bool> {
                 serde_json::Value::String(_) => true,
                 // Array prompts carry image blocks; arrays of tool_result do
                 // not start a turn.
-                serde_json::Value::Array(blocks) => blocks.iter().any(|b| {
-                    b.get("type").and_then(serde_json::Value::as_str) == Some("image")
-                }),
+                serde_json::Value::Array(blocks) => blocks
+                    .iter()
+                    .any(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("image")),
                 _ => false,
             };
             is_prompt.then_some(true)
@@ -347,6 +362,30 @@ async fn read_range(path: &std::path::Path, start: u64) -> Result<Vec<u8>, std::
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn complete_lines_preserve_partial_records_across_reads() {
+        let input = "\n{\"text\":\"你好 😀\"}\r\ninvalid json\n{\"partial\":".as_bytes();
+        let expected: Vec<&[u8]> =
+            vec![b"", "{\"text\":\"你好 😀\"}\r".as_bytes(), b"invalid json"];
+
+        // A read can end at any byte, including inside a multibyte character.
+        for split in 0..=input.len() {
+            let mut partial = Vec::new();
+            let mut lines = Vec::new();
+            for read in [&input[..split], &input[split..]] {
+                partial.extend_from_slice(read);
+                let mut consumed = 0;
+                for line in complete_lines(&partial) {
+                    consumed += line.len() + 1;
+                    lines.push(line.to_vec());
+                }
+                partial.drain(..consumed);
+            }
+            assert_eq!(lines, expected, "read split at {split}");
+            assert_eq!(partial, b"{\"partial\":", "read split at {split}");
+        }
+    }
 
     #[test]
     fn turn_state_tracks_transcript_markers() {
@@ -430,27 +469,25 @@ mod tests {
             json!([{"type":"thinking","thinking":"Consider the next step"}]),
             json!([{"type":"tool_use","id":"tool-1","name":"Read","input":{}}]),
         ] {
-            record_assistant_progress(&prompt, &progress);
+            record_assistant_progress(&prompt, turn_state(&prompt), &progress);
             assert!(!progress.load(Ordering::Relaxed));
 
-            record_assistant_progress(
-                &json!({"type":"assistant","message":{"content":content,"stop_reason":null}}),
-                &progress,
-            );
+            let assistant =
+                json!({"type":"assistant","message":{"content":content,"stop_reason":null}});
+            record_assistant_progress(&assistant, turn_state(&assistant), &progress);
             assert!(progress.load(Ordering::Relaxed));
 
             // Tool results and interruption markers belong to the same turn;
             // neither makes an already-started task an unanswered prompt again.
-            record_assistant_progress(&tool_result, &progress);
-            record_assistant_progress(&interrupt, &progress);
+            record_assistant_progress(&tool_result, turn_state(&tool_result), &progress);
+            record_assistant_progress(&interrupt, turn_state(&interrupt), &progress);
             assert!(progress.load(Ordering::Relaxed));
         }
 
         // Image prompts start a fresh turn too, including after history replay.
-        record_assistant_progress(
-            &json!({"type":"user","message":{"content":[{"type":"image","source":{}}]}}),
-            &progress,
-        );
+        let image_prompt =
+            json!({"type":"user","message":{"content":[{"type":"image","source":{}}]}});
+        record_assistant_progress(&image_prompt, turn_state(&image_prompt), &progress);
         assert!(!progress.load(Ordering::Relaxed));
     }
 
@@ -476,7 +513,7 @@ mod tests {
         for initial in [false, true] {
             let progress = AtomicBool::new(initial);
             for record in &ignored {
-                record_assistant_progress(record, &progress);
+                record_assistant_progress(record, turn_state(record), &progress);
                 assert_eq!(progress.load(Ordering::Relaxed), initial, "{record}");
             }
         }

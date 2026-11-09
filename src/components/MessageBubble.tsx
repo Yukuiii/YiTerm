@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { Msg } from '../stores/chat';
 import { oneLine } from '../format';
@@ -45,14 +45,14 @@ function BubbleImages({ paths }: { paths: string[] }) {
   );
 }
 
-export default function MessageBubble({
+export default memo(function MessageBubble({
   msg,
   onRetry,
   onSendAsIs,
 }: {
   msg: Msg;
-  onRetry: () => void;
-  onSendAsIs: () => void;
+  onRetry: (key: string) => void;
+  onSendAsIs: (key: string, original: string) => void;
 }) {
   const isUser = msg.role === 'user';
 
@@ -144,8 +144,8 @@ export default function MessageBubble({
           <div className="bubble-error">
             <div className="err-text">{msg.error}</div>
             <div className="err-actions">
-              <button onClick={onRetry}>重试翻译</button>
-              <button onClick={onSendAsIs}>照原文发送</button>
+              <button onClick={() => onRetry(msg.key)}>重试翻译</button>
+              <button onClick={() => onSendAsIs(msg.key, msg.original)}>照原文发送</button>
             </div>
           </div>
         )}
@@ -162,4 +162,4 @@ export default function MessageBubble({
       </div>
     </div>
   );
-}
+});

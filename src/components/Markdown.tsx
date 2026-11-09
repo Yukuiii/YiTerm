@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -6,7 +7,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
  * Renders assistant prose as GitHub-flavoured Markdown. Links open in the
  * system browser (never navigate the webview itself).
  */
-export default function Markdown({ children }: { children: string }) {
+export default memo(function Markdown({ children }: { children: string }) {
   return (
     <div className="md">
       <ReactMarkdown
@@ -36,4 +37,4 @@ export default function Markdown({ children }: { children: string }) {
       </ReactMarkdown>
     </div>
   );
-}
+});

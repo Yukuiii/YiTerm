@@ -22,16 +22,17 @@ impl Backlog {
 
     /// Appends bytes and returns the new `written` watermark.
     pub fn append(&mut self, bytes: &[u8]) -> u64 {
-        if self.cap == 0 {
-            self.written += bytes.len() as u64;
-            return self.written;
-        }
-        for &b in bytes {
-            self.buf.push_back(b);
-        }
-        while self.buf.len() > self.cap {
-            self.buf.pop_front();
-        }
+        // Discard obsolete bytes before extending so a full ring does not grow
+        // to accommodate output that would immediately be evicted.
+        let retained = if bytes.len() >= self.cap {
+            self.buf.clear();
+            &bytes[bytes.len() - self.cap..]
+        } else {
+            let discard = self.buf.len().saturating_sub(self.cap - bytes.len());
+            self.buf.drain(..discard);
+            bytes
+        };
+        self.buf.extend(retained);
         self.written += bytes.len() as u64;
         self.written
     }
@@ -80,6 +81,35 @@ mod tests {
         let (reset, data) = b.replay_after(15);
         assert!(!reset);
         assert_eq!(data, b"FGHIJ".to_vec());
+    }
+
+    #[test]
+    fn partial_eviction_reuses_the_ring_allocation() {
+        let mut b = Backlog::new(8);
+        b.append(b"012345");
+        let capacity = b.buf.capacity();
+
+        assert_eq!(b.append(b"ABC"), 9);
+        assert_eq!(b.buf.capacity(), capacity);
+        assert_eq!(b.replay_after(0), (true, b"12345ABC".to_vec()));
+        assert_eq!(b.replay_after(1), (false, b"12345ABC".to_vec()));
+        assert_eq!(b.replay_after(6), (false, b"ABC".to_vec()));
+    }
+
+    #[test]
+    fn oversized_append_keeps_only_the_suffix() {
+        let mut b = Backlog::new(8);
+        b.append(b"old");
+        let capacity = b.buf.capacity();
+
+        assert_eq!(b.append(b"0123456789ABCDEF"), 19);
+        assert_eq!(b.buf.capacity(), capacity);
+        assert_eq!(b.replay_after(0), (true, b"89ABCDEF".to_vec()));
+        assert_eq!(b.replay_after(11), (false, b"89ABCDEF".to_vec()));
+        assert_eq!(b.replay_after(17), (false, b"EF".to_vec()));
+
+        assert_eq!(b.append(b""), 19);
+        assert_eq!(b.replay_after(11), (false, b"89ABCDEF".to_vec()));
     }
 
     #[test]

@@ -71,14 +71,15 @@ pub fn is_cjk_char(c: char) -> bool {
 /// unpunctuated run is cut mid-text.
 pub fn chunk(text: &str, max: usize) -> Vec<String> {
     let mut chunks = Vec::new();
-    let mut runes: Vec<char> = text.chars().collect();
-    while runes.len() > max {
-        let cut = chunk_cut(&runes, max);
-        chunks.push(runes[..cut].iter().collect());
-        runes.drain(..cut);
+    let runes: Vec<char> = text.chars().collect();
+    let mut remaining = runes.as_slice();
+    while remaining.len() > max {
+        let cut = chunk_cut(remaining, max);
+        chunks.push(remaining[..cut].iter().collect());
+        remaining = &remaining[cut..];
     }
-    if !runes.is_empty() {
-        chunks.push(runes.iter().collect());
+    if !remaining.is_empty() {
+        chunks.push(remaining.iter().collect());
     }
     if chunks.is_empty() {
         chunks.push(String::new());
@@ -641,6 +642,16 @@ mod tests {
             chunks.iter().map(|c| c.chars().count()).sum::<usize>(),
             2000
         );
+    }
+
+    #[test]
+    fn chunk_preserves_unicode_and_newlines_across_multiple_chunks() {
+        let paragraphs: Vec<String> = ["😀", "🦀", "🚀", "🙂"]
+            .iter()
+            .map(|emoji| format!("{} {emoji}\n", "段".repeat(20)))
+            .collect();
+        let text = paragraphs.concat();
+        assert_eq!(chunk(&text, 24), paragraphs);
     }
 
     #[test]

@@ -10,12 +10,17 @@ export interface ToolCallItem extends ToolCall {
 
 function mergeToolCalls(prev: ToolCallItem[], incoming: ToolCall[]): ToolCallItem[] {
   const byId = new Map(prev.map((t) => [t.id, t]));
+  const mergedIds = new Set<string>();
   const merged: ToolCallItem[] = incoming.map((t) => {
+    mergedIds.add(t.id);
     const old = byId.get(t.id);
     return old ? { ...t, result: old.result, isError: old.isError } : { ...t };
   });
   for (const t of prev) {
-    if (!merged.some((x) => x.id === t.id)) merged.push(t);
+    if (!mergedIds.has(t.id)) {
+      merged.push(t);
+      mergedIds.add(t.id);
+    }
   }
   return merged;
 }
@@ -129,6 +134,7 @@ const debounceTimers = new Map<string, number>(); // `${convId}:${key}` → time
 const inflight = new Set<string>();
 const hydrated = new Set<string>();
 const lastSaved = new Map<string, string>();
+const dirtyConversations = new Set<string>();
 let saveTimer: number | undefined;
 const DEBOUNCE_MS = 1200;
 
@@ -390,7 +396,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       // assistant: upsert by key.
       // A later assistant line means the turn was not actually interrupted.
-      const pendingUser = [...list].reverse().find((x) => x.role === 'user');
+      const pendingUser = list.findLast((x) => x.role === 'user');
       if (
         pendingUser?.interrupted &&
         pendingUser.ts &&
@@ -628,26 +634,29 @@ export const useChatStore = create<ChatStore>((set, get) => ({
  * paths, so quitting inside the 500 ms window would lose the thumbnail.
  */
 function saveNow(convId: string) {
+  dirtyConversations.delete(convId);
   const msgs = useChatStore.getState().byConv[convId];
   if (!msgs) return;
   const json = JSON.stringify(msgs);
+  if (lastSaved.get(convId) === json) return;
   lastSaved.set(convId, json);
-  void chatSave(convId, json).catch(() => lastSaved.delete(convId));
+  void chatSave(convId, json).catch(() => {
+    if (lastSaved.get(convId) !== json) return;
+    lastSaved.delete(convId);
+    dirtyConversations.add(convId); // retry on the next change
+  });
 }
 
-// Debounced persistence: streaming deltas fire very often, so only write the
-// conversations whose serialized form actually changed, at most ~2x/second.
+// Debounced persistence: serialize only conversations whose message arrays
+// changed, leaving all other loaded histories untouched during streaming.
 useChatStore.subscribe((state, prev) => {
   if (state.byConv === prev.byConv) return;
+  for (const [convId, msgs] of Object.entries(state.byConv)) {
+    if (msgs !== prev.byConv[convId]) dirtyConversations.add(convId);
+  }
   if (saveTimer !== undefined) window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(() => {
-    for (const [convId, msgs] of Object.entries(useChatStore.getState().byConv)) {
-      const json = JSON.stringify(msgs);
-      if (lastSaved.get(convId) === json) continue;
-      lastSaved.set(convId, json);
-      void chatSave(convId, json).catch(() => {
-        lastSaved.delete(convId); // retry on next change
-      });
-    }
+    saveTimer = undefined;
+    for (const convId of [...dirtyConversations]) saveNow(convId);
   }, 500);
 });
