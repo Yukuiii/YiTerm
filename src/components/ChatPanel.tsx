@@ -12,6 +12,7 @@ import {
 import { useChatStore, type Msg } from '../stores/chat';
 import { useTerminalsStore } from '../stores/terminals';
 import { usePlanApproval } from '../hooks/usePlanApproval';
+import { useComposerKeyboard } from '../hooks/useComposerKeyboard';
 import { latestPlanCall } from '../planApproval';
 import { groupToolActivity } from '../toolActivity';
 import MessageBubble from './MessageBubble';
@@ -290,6 +291,8 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
     }
   };
 
+  const composerKeyboard = useComposerKeyboard(() => send());
+
   // Prompt submitted from the landing screen: wait until the PTY exists.
   useEffect(() => {
     if (!pending || exited !== undefined || planBlocked) return;
@@ -453,12 +456,7 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
             disabled={exited !== undefined}
             onChange={(e) => setInput(e.target.value)}
             onPaste={onPaste}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                void send();
-              }
-            }}
+            {...composerKeyboard}
           />
           <button
             className="send-btn"

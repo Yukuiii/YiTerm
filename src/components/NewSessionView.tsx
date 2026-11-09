@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useComposerKeyboard } from '../hooks/useComposerKeyboard';
 import Mascot from './Mascot';
 import { folderName } from '../format';
 import {
@@ -53,6 +54,8 @@ export default function NewSessionView({
       setBusy(false);
     }
   };
+
+  const composerKeyboard = useComposerKeyboard(submit);
 
   return (
     <div className="new-session">
@@ -116,12 +119,7 @@ export default function NewSessionView({
             rows={1}
             placeholder={selectedFolder ? '描述任务或提问…' : '先选择一个项目文件夹…'}
             onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                void submit();
-              }
-            }}
+            {...composerKeyboard}
           />
           <button
             className="send-btn"
