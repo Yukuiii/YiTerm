@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import {
@@ -9,12 +9,16 @@ import {
   terminalSendPrompt,
   terminalWrite,
 } from '../ipc';
-import { useChatStore } from '../stores/chat';
+import { useChatStore, type Msg } from '../stores/chat';
 import { useTerminalsStore } from '../stores/terminals';
 import { usePlanApproval } from '../hooks/usePlanApproval';
 import { latestPlanCall } from '../planApproval';
+import { groupToolActivity } from '../toolActivity';
 import MessageBubble from './MessageBubble';
+import ToolActivity from './ToolActivity';
 import { ArrowDownIcon, ArrowUpIcon, FileIcon, PaperclipIcon, XIcon } from './Icons';
+
+const EMPTY_MESSAGES: Msg[] = [];
 
 interface PendingImage {
   id: string;
@@ -40,7 +44,8 @@ function withFiles(text: string, files: string[]): string {
 }
 
 export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; onOpenTerminal: () => void }) {
-  const msgs = useChatStore((s) => s.byConv[convId]) ?? [];
+  const msgs = useChatStore((s) => s.byConv[convId]) ?? EMPTY_MESSAGES;
+  const rows = useMemo(() => groupToolActivity(msgs), [msgs]);
   const terminal = useTerminalsStore((s) => s.byConv[convId]);
   const exited = useTerminalsStore((s) => (convId in s.exited ? s.exited[convId] : undefined));
   const latestPlan = latestPlanCall(msgs);
@@ -374,13 +379,16 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
             Claude 的英文回复会自动翻译成中文显示。
           </div>
         )}
-        {msgs.map((m) => (
+        {rows.map((row) => row.type === 'tools' ? (
+          <ToolActivity key={row.key} messages={row.messages} />
+        ) : (
           <MessageBubble
-            key={m.key}
-            msg={m}
+            key={row.key}
+            msg={row.message}
+            hideActivity={row.hideActivity}
             onRetry={retryTranslate}
             onSendAsIs={sendAsIs}
-            planControls={m.key === pendingPlan?.messageKey ? planControls : undefined}
+            planControls={row.message.key === pendingPlan?.messageKey ? planControls : undefined}
           />
         ))}
       </div>

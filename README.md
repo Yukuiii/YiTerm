@@ -52,9 +52,8 @@ Claude Code is a great coding agent, but it works in English and its conversatio
   - Fenced code and inline code are protected with sentinels so they survive translation
 - **Real terminal**, powered by `portable-pty` and xterm.js, with backlog replay on reattach
 - **Session mirror** from Claude Code's JSONL transcript
-  - one collapsible line per agent step, labelled with the tool's description
-  - thinking on its own collapsible line
-  - tool commands, results, and errors revealed on expand
+  - consecutive thinking and tool activity grouped under one collapsible summary, with thinking/file/tool counts
+  - thinking, tool commands, results, and errors revealed on expand
 - **GitHub-flavoured Markdown**: tables, code blocks, lists; links open in the system browser
 - **Project-grouped sessions** with search and per-project “new session”
 - **Claude Code records in the sidebar** — every project registered in

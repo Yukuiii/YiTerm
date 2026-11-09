@@ -1,26 +1,12 @@
 import { memo, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { Msg } from '../stores/chat';
-import { oneLine } from '../format';
 import Markdown from './Markdown';
 import PlanCard, { type PlanControls } from './PlanCard';
-import { ChevronIcon, CodeIcon, FileIcon, SparkleIcon, TerminalIcon } from './Icons';
+import ToolActivity from './ToolActivity';
+import { FileIcon } from './Icons';
 
 const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
-
-/** One-line verb for tool steps whose label is a bare path/pattern/url. */
-const TOOL_ACTION: Record<string, string> = {
-  Read: '读取',
-  Write: '写入',
-  Edit: '编辑',
-  MultiEdit: '编辑',
-  NotebookEdit: '编辑',
-  Grep: '搜索',
-  Glob: '查找',
-  WebFetch: '抓取',
-  WebSearch: '搜索',
-  Task: '子任务',
-};
 
 /**
  * Thumbnails for pasted screenshots. They live in the app cache, which the OS
@@ -51,11 +37,13 @@ export default memo(function MessageBubble({
   onRetry,
   onSendAsIs,
   planControls,
+  hideActivity = false,
 }: {
   msg: Msg;
   onRetry: (key: string) => void;
   onSendAsIs: (key: string, original: string) => void;
   planControls?: PlanControls;
+  hideActivity?: boolean;
 }) {
   const isUser = msg.role === 'user';
 
@@ -90,58 +78,7 @@ export default memo(function MessageBubble({
   return (
     <div className={`bubble-row ${isUser ? 'from-user' : 'from-ai'}`}>
       <div className={`bubble ${isUser ? 'user' : 'ai'}`}>
-        {thinking && (
-          <details className="thinking-line">
-            <summary>
-              <span className="step-icon"><SparkleIcon size={14} /></span>
-              <span className="step-label" title={thinking}>{oneLine(thinking, 96)}</span>
-              <ChevronIcon size={13} className="step-chevron" />
-            </summary>
-            <div className="step-body">
-              <div className="thinking-body">{thinking}</div>
-            </div>
-          </details>
-        )}
-
-        {msg.toolCalls.length > 0 && (
-          <div className="step-list">
-            {msg.toolCalls.map((t) => {
-              // Older caches used an empty input object as the tool label/detail.
-              const detail = t.detail === '{}' ? '' : t.detail;
-              const isPlanUpdate = ['Write', 'Edit', 'MultiEdit'].includes(t.name) &&
-                /(?:^|[/\\])\.claude[/\\]plans[/\\][^/\\]+\.md$/.test(detail);
-              const StepIcon = t.name === 'EnterPlanMode' || isPlanUpdate ? FileIcon
-                : t.name === 'Bash' ? TerminalIcon : CodeIcon;
-              const label = isPlanUpdate ? 'Update Plan'
-                : t.name === 'EnterPlanMode' ? 'Enter Plan Mode'
-                  : (t.label || detail || t.name);
-              const action = isPlanUpdate || label === t.name ? undefined : TOOL_ACTION[t.name];
-              return (
-                <details key={t.id} className={`step-item ${t.isError ? 'is-error' : ''}`}>
-                  <summary>
-                    <span className="step-icon"><StepIcon size={14} /></span>
-                    <span className="step-label" title={detail || t.name}>
-                      {action && <span className="step-action">{action}</span>}
-                      {label}
-                    </span>
-                    {t.result !== undefined && (
-                      <span className="step-status">{t.isError ? '失败' : '✓'}</span>
-                    )}
-                    <ChevronIcon size={13} className="step-chevron" />
-                  </summary>
-                  <div className="step-body">
-                    {detail && <pre className="step-command">{detail}</pre>}
-                    {t.result !== undefined ? (
-                      <pre className="step-output">{t.result || '（无输出）'}</pre>
-                    ) : (
-                      <div className="step-pending">等待输出…</div>
-                    )}
-                  </div>
-                </details>
-              );
-            })}
-          </div>
-        )}
+        {!hideActivity && (thinking || msg.toolCalls.length > 0) && <ToolActivity messages={[msg]} />}
 
         {msg.images && msg.images.length > 0 && <BubbleImages paths={msg.images} />}
 

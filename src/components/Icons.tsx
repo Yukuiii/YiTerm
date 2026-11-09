@@ -119,6 +119,12 @@ export const TerminalIcon = ({ size = 16 }: { size?: number }) => (
   </Icon>
 );
 
+export const WrenchIcon = ({ size = 16 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M14.7 6.3a5 5 0 0 0-6.4 6.4l-5.7 5.7a2.1 2.1 0 0 0 3 3l5.7-5.7a5 5 0 0 0 6.4-6.4l-3.2 3.2-3-3z" />
+  </Icon>
+);
+
 export const CodeIcon = ({ size = 16 }: { size?: number }) => (
   <Icon size={size}>
     <path d="m8 6-5 6 5 6" />
