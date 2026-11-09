@@ -1,4 +1,11 @@
-use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex}};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use serde::Serialize;
 use tauri::Emitter;
@@ -46,6 +53,7 @@ pub fn spawn_follower(
     session_id: String,
     imported: bool,
     busy: Arc<Mutex<HashMap<String, bool>>>,
+    assistant_since_prompt: Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     tracing::info!(?path, conv_id = %conv_id, "follower started");
     tokio::spawn(async move {
@@ -67,7 +75,6 @@ pub fn spawn_follower(
         // The last user prompt, kept so an interrupt that arrives before any
         // assistant reply can mark that bubble as interrupted.
         let mut last_user: Option<ChatMsg> = None;
-        let mut assistant_since_prompt = false;
         let mut marked_interrupted = false;
 
         loop {
@@ -86,7 +93,7 @@ pub fn spawn_follower(
                 historical = true;
                 last_turn_was_user = false;
                 last_user = None;
-                assistant_since_prompt = false;
+                assistant_since_prompt.store(false, Ordering::Relaxed);
                 marked_interrupted = false;
             }
             if len <= last_pos && partial.is_empty() {
@@ -122,30 +129,16 @@ pub fn spawn_follower(
                 let is_user_prompt = state == Some(true)
                     && v.get("type").and_then(serde_json::Value::as_str) == Some("user");
                 if is_user_prompt {
-                    match parsed.iter().find(|m| m.role == Role::User) {
-                        Some(msg) => {
-                            last_user = Some(msg.clone());
-                            assistant_since_prompt = false;
-                            marked_interrupted = false;
-                        }
-                        None => {
-                            last_user = None;
-                            assistant_since_prompt = false;
-                            marked_interrupted = false;
-                        }
-                    }
-                } else if v.get("type").and_then(serde_json::Value::as_str) == Some("assistant")
-                    && v.get("isSidechain").and_then(serde_json::Value::as_bool) != Some(true)
-                    && !v.get("message").is_some_and(is_synthetic_no_response)
-                {
-                    assistant_since_prompt = true;
+                    last_user = parsed.iter().find(|m| m.role == Role::User).cloned();
+                    marked_interrupted = false;
                 }
+                record_assistant_progress(&v, &assistant_since_prompt);
 
                 // An interrupt before any assistant line leaves no reply: mark
                 // the prompt so the chat can say "已中断" instead of showing a
                 // silently dangling user bubble.
                 if !marked_interrupted
-                    && !assistant_since_prompt
+                    && !assistant_since_prompt.load(Ordering::Relaxed)
                     && (has_interrupt_marker(&v)
                         || v.get("message").is_some_and(is_synthetic_no_response))
                 {
@@ -261,6 +254,23 @@ fn has_interrupt_marker(v: &serde_json::Value) -> bool {
     v.get("type").and_then(serde_json::Value::as_str) == Some("user")
         && v.pointer("/message/content")
             .is_some_and(|content| message_texts(content).iter().any(|t| is_interrupt_marker(t)))
+}
+
+/// Track the first real assistant record in each main-session turn. Tool
+/// results, local commands and synthetic replies must not reset this progress.
+fn record_assistant_progress(v: &serde_json::Value, assistant_since_prompt: &AtomicBool) {
+    match v.get("type").and_then(serde_json::Value::as_str) {
+        Some("user") if turn_state(v) == Some(true) => {
+            assistant_since_prompt.store(false, Ordering::Relaxed);
+        }
+        Some("assistant")
+            if v.get("isSidechain").and_then(serde_json::Value::as_bool) != Some(true)
+                && !v.get("message").is_some_and(is_synthetic_no_response) =>
+        {
+            assistant_since_prompt.store(true, Ordering::Relaxed);
+        }
+        _ => {}
+    }
 }
 
 /// Busy state to report after replaying history. A turn that ends on a user
@@ -401,6 +411,75 @@ mod tests {
             })),
             None
         );
+    }
+
+    #[test]
+    fn assistant_progress_survives_tools_and_resets_for_new_prompts() {
+        let progress = AtomicBool::new(false);
+        let prompt = json!({"type":"user","message":{"content":"start a task"}});
+        let tool_result = json!({
+            "type":"user",
+            "message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}
+        });
+        let interrupt = json!({
+            "type":"user",
+            "message":{"content":"[Request interrupted by user]"}
+        });
+        for content in [
+            json!([{"type":"text","text":"Working on it"}]),
+            json!([{"type":"thinking","thinking":"Consider the next step"}]),
+            json!([{"type":"tool_use","id":"tool-1","name":"Read","input":{}}]),
+        ] {
+            record_assistant_progress(&prompt, &progress);
+            assert!(!progress.load(Ordering::Relaxed));
+
+            record_assistant_progress(
+                &json!({"type":"assistant","message":{"content":content,"stop_reason":null}}),
+                &progress,
+            );
+            assert!(progress.load(Ordering::Relaxed));
+
+            // Tool results and interruption markers belong to the same turn;
+            // neither makes an already-started task an unanswered prompt again.
+            record_assistant_progress(&tool_result, &progress);
+            record_assistant_progress(&interrupt, &progress);
+            assert!(progress.load(Ordering::Relaxed));
+        }
+
+        // Image prompts start a fresh turn too, including after history replay.
+        record_assistant_progress(
+            &json!({"type":"user","message":{"content":[{"type":"image","source":{}}]}}),
+            &progress,
+        );
+        assert!(!progress.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn internal_records_do_not_change_assistant_progress() {
+        let ignored = [
+            json!({"type":"system"}),
+            json!({"type":"user","isMeta":true,"message":{"content":"context"}}),
+            json!({"type":"user","isSidechain":true,"message":{"content":"subtask"}}),
+            json!({"type":"assistant","isSidechain":true,"message":{"content":"subtask reply"}}),
+            json!({"type":"user","message":{"content":"<command-name>/model</command-name>"}}),
+            json!({"type":"user","message":{"content":[{"type":"tool_result"}]}}),
+            json!({"type":"user","message":{"content":"[Request interrupted by user]"}}),
+            json!({
+                "type":"assistant",
+                "message":{
+                    "model":"<synthetic>",
+                    "content":[{"type":"text","text":"No response requested."}],
+                    "stop_reason":"end_turn"
+                }
+            }),
+        ];
+        for initial in [false, true] {
+            let progress = AtomicBool::new(initial);
+            for record in &ignored {
+                record_assistant_progress(record, &progress);
+                assert_eq!(progress.load(Ordering::Relaxed), initial, "{record}");
+            }
+        }
     }
 
     #[test]

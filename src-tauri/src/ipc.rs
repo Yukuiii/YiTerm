@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 
 use serde::Serialize;
 use tauri::{Emitter, State, ipc::Channel};
@@ -254,6 +254,7 @@ pub async fn terminal_start(
                 session_id.clone(),
                 conv.imported,
                 state.busy.clone(),
+                handle.assistant_since_prompt.clone(),
             ),
         );
     }
@@ -327,13 +328,19 @@ pub fn terminal_write(
             },
         );
 
-        // Claude Code restores the aborted prompt into its own input. Its
-        // clear gesture is an Esc double-tap. Write directly to the PTY so the
-        // clearing Escs don't re-enter this interrupt path.
-        if was_busy == Some(true) {
+        // Before the first assistant record, Claude Code restores the aborted
+        // prompt into its input; later interruptions leave the input empty.
+        // Only the former needs an Esc double-tap. Write directly to the PTY so
+        // the clearing Escs don't re-enter this interrupt path.
+        if was_busy == Some(true) && !handle.assistant_since_prompt.load(Ordering::Relaxed) {
             let clear = handle.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // The follower can observe a reply during the delay, in which
+                // case no restored input needs clearing after all.
+                if clear.assistant_since_prompt.load(Ordering::Relaxed) {
+                    return;
+                }
                 tracing::info!(id = clear.id, "interrupt clear: esc double tap");
                 let _ = clear.write("\x1b", false);
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;

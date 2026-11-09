@@ -3,8 +3,8 @@ pub mod buffer;
 use std::{
     io::{Read, Write},
     sync::{
-        atomic::{AtomicI64, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicI64, Ordering},
     },
     time::Duration,
 };
@@ -54,6 +54,8 @@ pub struct TerminalHandle {
     pub command: String,
     pub started_at_ms: i64,
     pub exited: Mutex<bool>,
+    /// Shared with the transcript follower; thinking and tool calls count as replies.
+    pub assistant_since_prompt: Arc<AtomicBool>,
     /// When the PTY last produced output (unix millis). The idle-terminal
     /// reclaimer treats recent output as "still running".
     last_output_ms: AtomicI64,
@@ -152,6 +154,7 @@ impl TerminalHandle {
             command,
             started_at_ms,
             exited: Mutex::new(false),
+            assistant_since_prompt: Arc::new(AtomicBool::new(false)),
             last_output_ms: AtomicI64::new(chrono_millis()),
             backlog: Mutex::new(Backlog::new(RING_CAP)),
             subs: Mutex::new(Vec::new()),
