@@ -118,14 +118,21 @@ export default memo(function MessageBubble({
         {msg.toolCalls.length > 0 && (
           <div className="step-list">
             {msg.toolCalls.map((t) => {
-              const StepIcon = t.name === 'Bash' ? TerminalIcon : CodeIcon;
-              const label = t.label || t.detail || t.name;
-              const action = label === t.name ? undefined : TOOL_ACTION[t.name];
+              // Older caches used an empty input object as the tool label/detail.
+              const detail = t.detail === '{}' ? '' : t.detail;
+              const isPlanUpdate = ['Write', 'Edit', 'MultiEdit'].includes(t.name) &&
+                /(?:^|[/\\])\.claude[/\\]plans[/\\][^/\\]+\.md$/.test(detail);
+              const StepIcon = t.name === 'EnterPlanMode' || isPlanUpdate ? FileIcon
+                : t.name === 'Bash' ? TerminalIcon : CodeIcon;
+              const label = isPlanUpdate ? 'Update Plan'
+                : t.name === 'EnterPlanMode' ? 'Enter Plan Mode'
+                  : (t.label || detail || t.name);
+              const action = isPlanUpdate || label === t.name ? undefined : TOOL_ACTION[t.name];
               return (
                 <details key={t.id} className={`step-item ${t.isError ? 'is-error' : ''}`}>
                   <summary>
                     <span className="step-icon"><StepIcon size={14} /></span>
-                    <span className="step-label" title={t.detail || t.name}>
+                    <span className="step-label" title={detail || t.name}>
                       {action && <span className="step-action">{action}</span>}
                       {label}
                     </span>
@@ -135,7 +142,7 @@ export default memo(function MessageBubble({
                     <ChevronIcon size={13} className="step-chevron" />
                   </summary>
                   <div className="step-body">
-                    {t.detail && <pre className="step-command">{t.detail}</pre>}
+                    {detail && <pre className="step-command">{detail}</pre>}
                     {t.result !== undefined ? (
                       <pre className="step-output">{t.result || '（无输出）'}</pre>
                     ) : (

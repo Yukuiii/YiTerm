@@ -123,6 +123,9 @@ fn summarize_tool_input(input: Option<&Value>) -> String {
         return String::new();
     };
     if let Some(obj) = input.as_object() {
+        if obj.is_empty() {
+            return String::new();
+        }
         for key in [
             "command",
             "file_path",
@@ -740,6 +743,7 @@ mod tests {
         );
         assert!(summarize_tool_input(Some(&json!({ "weird_key": 42 }))).contains("weird_key"));
         assert_eq!(summarize_tool_input(None), "");
+        assert_eq!(summarize_tool_input(Some(&json!({}))), "");
     }
 
     #[test]
@@ -762,6 +766,10 @@ mod tests {
         assert_eq!(t.label, "检查仓库状态");
         assert_eq!(t.detail, "git status --short");
         assert_eq!(summarize_tool_label(None, "Bash"), "Bash");
+        assert_eq!(
+            summarize_tool_label(Some(&json!({})), "EnterPlanMode"),
+            "EnterPlanMode"
+        );
     }
 
     #[test]
