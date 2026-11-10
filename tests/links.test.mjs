@@ -169,6 +169,28 @@ test('local references separate source line and column suffixes from the actual 
   }
 });
 
+test('bare file-like tokens are never turned into links, only web URLs are', () => {
+  for (const text of [
+    'Built with Node.js, Vue.js, Next.js, Express.js and Three.js.',
+    'Read src/App.tsx:12 and package.json next.',
+    'Read `src/App.tsx:12` and `package.json` next.',
+  ]) {
+    assert.deepEqual(urls(text), []);
+    assert.equal([...splitLinks(text)].map((part) => part.text).join(''), text);
+  }
+});
+
+test('the reported Electron reply keeps Node.js as text instead of a failing file tag', () => {
+  const text = '- **Shell:** Electron (Chromium + Node.js; ~v42 as of the mid-2026 build), chosen explicitly so the same UI could ship on Windows quickly';
+  const html = renderInProject(Markdown, { children: text });
+  assert.doesNotMatch(html, /<a /);
+  assert.doesNotMatch(html, /打开失败/);
+  assert.match(html, /Node\.js/);
+  const inline = renderInProject(Markdown, { children: 'The runtime is `Node.js`.' });
+  assert.doesNotMatch(inline, /<a /);
+  assert.match(inline, /<code>Node\.js<\/code>/);
+});
+
 test('the exact reported English and Chinese replies retain a clickable local Markdown target', () => {
   const target = '/Users/admin/code/yiterm/src/components/TerminalPanel.tsx:152';
   for (const text of [
@@ -185,14 +207,15 @@ test('the exact reported English and Chinese replies retain a clickable local Ma
   }
 });
 
-test('bare paths and inline code file references become clickable using project context', () => {
-  const html = renderInProject(Markdown, { children: '观察者位于 src/components/TerminalPanel.tsx:152，配置见 `package.json`。' });
-  assert.equal((html.match(/<a /g) ?? []).length, 2);
-  assert.match(html, /data-file-path="src\/components\/TerminalPanel.tsx"/);
-  assert.match(html, /<code><a [^>]*data-file-path="package.json"/);
-  const text = 'Read src/App.tsx:12:3, then https://example.com/src/App.tsx:12.';
-  assert.equal([...splitLinks(text)].map((part) => part.text).join(''), text);
-  assert.deepEqual(urls(text), ['src/App.tsx:12:3', 'https://example.com/src/App.tsx:12']);
+test('bare paths and inline code file references stay plain text without an explicit Markdown link', () => {
+  const text = '观察者位于 src/components/TerminalPanel.tsx:152，配置见 `package.json`。';
+  const html = renderInProject(Markdown, { children: text });
+  assert.doesNotMatch(html, /<a /);
+  assert.match(html, /<code>package\.json<\/code>/);
+  assert.match(html, /src\/components\/TerminalPanel\.tsx:152/);
+  const urlsOnly = 'Read src/App.tsx:12:3, then https://example.com/src/App.tsx:12.';
+  assert.equal([...splitLinks(urlsOnly)].map((part) => part.text).join(''), urlsOnly);
+  assert.deepEqual(urls(urlsOnly), ['https://example.com/src/App.tsx:12']);
 });
 
 test('file URL targets decode spaces and preserve explicit labels without nested anchors', () => {
@@ -210,13 +233,16 @@ test('relative references need a project folder rather than guessing from the we
   assert.match(contextual, /data-file-path="src\/App.tsx"/);
 });
 
-test('Markdown file discovery preserves existing links and also works in lists and tables', () => {
+test('explicit Markdown file links work in lists and tables while bare paths stay text', () => {
   const html = renderInProject(Markdown, { children: [
-    '- src/App.tsx:12', '', '| File |', '| --- |', '| src/main.tsx |', '',
+    '- src/App.tsx:12', '- [App source](src/App.tsx:12)', '',
+    '| File |', '| --- |', '| src/main.tsx |', '| [Main](src/main.tsx) |', '',
     '[src/label.ts](https://example.com/source) [named](../shared/config.json:8)',
   ].join('\n') });
-  assert.match(html, /<li><a [^>]*data-file-path="src\/App.tsx"/);
-  assert.match(html, /<td><a [^>]*data-file-path="src\/main.tsx"/);
+  assert.equal((html.match(/data-file-path="src\/App\.tsx"/g) ?? []).length, 1);
+  assert.equal((html.match(/data-file-path="src\/main\.tsx"/g) ?? []).length, 1);
+  assert.match(html, /<li>src\/App\.tsx:12<\/li>/);
+  assert.match(html, /<td>src\/main\.tsx<\/td>/);
   assert.match(html, /href="https:\/\/example.com\/source"/);
   assert.match(html, /data-file-path="..\/shared\/config.json"/);
   assert.doesNotMatch(html, /data-file-path="src\/label.ts"/);

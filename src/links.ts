@@ -73,7 +73,10 @@ function trimUrl(value: string): string {
   return value.slice(0, end);
 }
 
-/** Linkify text without interpreting Markdown or changing whitespace/code. */
+/**
+ * Linkify bare web URLs without interpreting Markdown or changing whitespace.
+ * Local files are linked only when explicitly written as Markdown links.
+ */
 export function splitLinks(text: string): LinkPart[] {
   const pattern = /\b(?:https?:\/\/|www\.)[^\s<>"'`，。！？；：、（）【】「」『』]+/giu;
   const parts: LinkPart[] = [];
@@ -87,42 +90,5 @@ export function splitLinks(text: string): LinkPart[] {
     offset = match.index + label.length;
   }
   if (offset < text.length) parts.push({ text: text.slice(offset) });
-  return parts.flatMap((part) => part.href ? [part] : splitFileLinks(part.text));
-}
-
-function splitFileLinks(text: string): LinkPart[] {
-  const pattern = /file:\/\/[^\s<>"'`，。！？；：、（）【】「」『』]+|(?<![\w@.%+-])(?:~\/|\.{1,2}\/|\/)?(?:[\w@.%+-]+\/)*[\w@.%+-]+\.(?:[cm]?[jt]sx?|rs|py|java|go|cpp|cc|c|hpp|h|cs|swift|kt|rb|php|sh|sql|html?|css|scss|mdx?|txt|jsonc?|ya?ml|toml|xml|csv|ini|conf|vue|svelte|ipynb|lock|log|pdf)(?::\d+(?::\d+)?)?(?:#L\d+(?:C\d+)?)?(?!\w)/gi;
-  const parts: LinkPart[] = [];
-  let offset = 0;
-  for (const match of text.matchAll(pattern)) {
-    const label = trimUrl(match[0]);
-    if (!fileReference(label)) continue;
-    if (match.index > offset) parts.push({ text: text.slice(offset, match.index) });
-    parts.push({ text: label, href: label });
-    offset = match.index + label.length;
-  }
-  if (offset < text.length) parts.push({ text: text.slice(offset) });
   return parts;
-}
-
-interface ContentNode {
-  type: string;
-  value?: string;
-  url?: string;
-  children?: ContentNode[];
-}
-
-/** Recognize bare file references throughout Markdown, preserving existing links. */
-export function remarkContentLinks() {
-  return function transform(node: ContentNode) {
-    if (!node.children || node.type === 'link' || node.type === 'linkReference') return;
-    node.children = node.children.flatMap((child): ContentNode[] => {
-      if (child.type !== 'text' || !child.value) { transform(child); return [child]; }
-      const parts = splitLinks(child.value);
-      if (!parts.some((part) => part.href)) return [child];
-      return parts.map((part) => part.href
-        ? { type: 'link', url: part.href, children: [{ type: 'text', value: part.text }] }
-        : { type: 'text', value: part.text });
-    });
-  };
 }

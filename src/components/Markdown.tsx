@@ -1,7 +1,7 @@
 import { createContext, memo, useContext } from 'react';
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { fileReference, remarkContentLinks } from '../links';
+import { fileReference } from '../links';
 import ContentLink, { LinkedText } from './ContentLink';
 
 const MarkdownSource = createContext('');
@@ -37,7 +37,7 @@ export default memo(function Markdown({ children }: { children: string }) {
     <MarkdownSource.Provider value={children}>
       <div className="md">
         <ReactMarkdown
-          remarkPlugins={[remarkGfm, remarkContentLinks]}
+          remarkPlugins={[remarkGfm]}
           components={components}
           urlTransform={(url, key) => key === 'href' && fileReference(url) ? url : defaultUrlTransform(url)}
         >

@@ -57,8 +57,9 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 - **GitHub-flavoured Markdown**: tables, code blocks, lists
 - **Clickable URLs throughout chat** — URLs in replies, prompts, code, thinking,
   and tool output open in the system browser; explicit Markdown link targets are preserved
-- **Clickable local files** — source paths with line/column suffixes and `file://`
-  links open in their default application; relative paths use the conversation's project folder
+- **Clickable local files** — explicitly Markdown-linked source paths with
+  line/column suffixes and `file://` links open in their default application;
+  relative paths use the conversation's project folder
 - **Project-grouped sessions** with search and per-project “new session”
 - **Claude Code records in the sidebar** — every project registered in
   `~/.claude.json` plus existing CLI sessions are listed and resumable;
