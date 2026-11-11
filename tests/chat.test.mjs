@@ -323,3 +323,134 @@ test('local plan translation preserves its covered prefix and translates the fin
   assert.equal(message.translation, '# 计划\n\n第一步。\n\n最终验证步骤');
   assert.equal(message.translatedFrom, prefix + tail);
 });
+
+function userLine(key, text, overrides = {}) {
+  return {
+    key, role: 'user', text, ts: null, thinking: null,
+    toolCalls: [], toolResult: null, done: true, ...overrides,
+  };
+}
+
+function assistantLine(key, text, overrides = {}) {
+  return {
+    key, role: 'assistant', text, ts: null, thinking: null,
+    toolCalls: [], toolResult: null, done: false, ...overrides,
+  };
+}
+
+test('a transcript prompt reconciles with its optimistic bubble and keeps the local key', async () => {
+  const { store } = await setup();
+  const key = store.getState().addOptimistic('conv', '你好');
+  store.getState().markSent('conv', key, 'Hello');
+  const line = userLine('uuid-1', '  Hello\n', { ts: '2026-01-01T00:00:00Z' });
+  // The JSONL line can land while the outbound translation is still running.
+  store.getState().upsertFromSession('conv', [line], false);
+  store.getState().upsertFromSession('conv', [line], false);
+  const messages = store.getState().byConv.conv;
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].key, key, 'in-flight translation callbacks address the local key');
+  assert.equal(messages[0].sessionKey, 'uuid-1');
+  assert.equal(messages[0].ts, '2026-01-01T00:00:00Z');
+  assert.equal(messages[0].original, '你好');
+  store.getState().setTranslation('conv', key, 'Hello', '你好');
+  assert.equal(store.getState().byConv.conv[0].translation, 'Hello');
+});
+
+test('a prompt typed in the terminal becomes its own bubble without image markers', async () => {
+  const { store } = await setup();
+  const line = userLine('uuid-1', '[Image #1] look   here');
+  store.getState().upsertFromSession('conv', [line], false);
+  store.getState().upsertFromSession('conv', [line], false);
+  const messages = store.getState().byConv.conv;
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].key, 'uuid-1');
+  assert.equal(messages[0].sessionKey, 'uuid-1');
+  assert.equal(messages[0].fromTerminal, true);
+  assert.equal(messages[0].original, 'look here');
+  assert.equal(messages[0].hadImages, true);
+
+  store.getState().upsertFromSession('conv', [userLine('uuid-2', 'plain text')], false);
+  assert.equal(store.getState().byConv.conv[1].hadImages, undefined);
+});
+
+test('an image prompt reconciles through its pasted path or attachment marker', async () => {
+  for (const text of ['/cache/a.png look', '[Image #1] look']) {
+    const { store } = await setup();
+    const key = store.getState().addPlain('conv', 'look', ['/cache/a.png']);
+    store.getState().upsertFromSession('conv', [userLine('uuid-1', text)], false);
+    const messages = store.getState().byConv.conv;
+    assert.equal(messages.length, 1, text);
+    assert.equal(messages[0].key, key);
+    assert.equal(messages[0].sessionKey, 'uuid-1');
+    assert.equal(messages[0].original, 'look');
+  }
+  // Without an image of its own, a bubble never matches by a stripped path.
+  const { store } = await setup();
+  store.getState().addPlain('conv', 'look');
+  store.getState().upsertFromSession('conv', [userLine('uuid-1', '/cache/a.png look')], false);
+  assert.equal(store.getState().byConv.conv.length, 2);
+});
+
+test('an interrupt marks the unreconciled bubble, not an older one with the same text', async () => {
+  const { store } = await setup();
+  const first = store.getState().addPlain('conv', 'retry');
+  store.getState().upsertFromSession('conv', [userLine('uuid-1', 'retry')], false);
+  const second = store.getState().addPlain('conv', 'retry');
+  store.getState().upsertFromSession('conv', [userLine('uuid-2', 'retry', { interrupted: true })], false);
+  const messages = store.getState().byConv.conv;
+  assert.deepEqual(Array.from(messages, (m) => m.key), [first, second]);
+  assert.equal(messages[0].sessionKey, 'uuid-1');
+  assert.equal(messages[0].interrupted, undefined);
+  assert.equal(messages[1].sessionKey, 'uuid-2');
+  assert.equal(messages[1].interrupted, true);
+});
+
+test('an interrupt update for a known transcript key marks it without adding a bubble', async () => {
+  // An older cache holds the turn under its transcript key, with no session key.
+  const cached = [cachedPlan({ key: 'uuid-1', role: 'user', original: 'older text', toolCalls: [] })];
+  const { store } = await setup({ load: async () => JSON.stringify(cached) });
+  await store.getState().hydrate('conv');
+  store.getState().upsertFromSession('conv', [userLine('uuid-1', 'different text')], false);
+  assert.equal(store.getState().byConv.conv[0].interrupted, undefined);
+  store.getState().upsertFromSession(
+    'conv', [userLine('uuid-1', 'different text', { interrupted: true })], false,
+  );
+  const messages = store.getState().byConv.conv;
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].original, 'older text');
+  assert.equal(messages[0].interrupted, true);
+});
+
+test('only a later assistant reply clears an interrupted prompt', async () => {
+  const prompt = userLine('uuid-1', 'go', { ts: '2026-01-01T00:00:10Z', interrupted: true });
+  for (const [replyAt, interrupted] of [
+    ['2026-01-01T00:00:15Z', false],
+    ['2026-01-01T00:00:05Z', true],
+    [null, true],
+  ]) {
+    const { store } = await setup();
+    store.getState().upsertFromSession('conv', [prompt], false);
+    assert.equal(store.getState().byConv.conv[0].interrupted, true);
+    store.getState().upsertFromSession('conv', [assistantLine('msg-1', 'ok', { ts: replyAt })], false);
+    const messages = store.getState().byConv.conv;
+    assert.equal(messages.length, 2);
+    assert.equal(messages[0].interrupted, interrupted, `reply at ${replyAt}`);
+    assert.equal(messages[1].original, 'ok');
+  }
+});
+
+test('block-scoped assistant lines merge without wiping text, thinking or completion', async () => {
+  const { store } = await setup();
+  const upsert = (overrides) =>
+    store.getState().upsertFromSession('conv', [assistantLine('msg-1', '', overrides)], false);
+  upsert({ thinking: 'Consider the request.' });
+  upsert({ text: 'Final answer.', done: true });
+  // A late block for the same message id carries neither text nor thinking.
+  upsert({ toolCalls: [{ id: 'read', name: 'Read', label: 'file', detail: 'file' }] });
+  const messages = store.getState().byConv.conv;
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].original, 'Final answer.');
+  assert.equal(messages[0].thinking, 'Consider the request.');
+  assert.equal(messages[0].done, true);
+  assert.deepEqual(Array.from(messages[0].toolCalls, (call) => call.id), ['read']);
+});
