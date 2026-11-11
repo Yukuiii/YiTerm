@@ -310,6 +310,15 @@ fn command_error(output: &ProcessOutput) -> String {
     }
 }
 
+/// Runs one Git command that must succeed with complete output.
+fn git_output(command: &mut Command, limit: usize) -> Result<ProcessOutput, String> {
+    let output = run_git(command, limit, false, DEADLINE)?;
+    if !output.status.success() {
+        return Err(command_error(&output));
+    }
+    Ok(output)
+}
+
 fn repository_root(folder: &Path) -> Result<Option<String>, String> {
     let metadata = std::fs::metadata(folder).map_err(|e| format!("无法访问目录：{e}"))?;
     if !metadata.is_dir() {
@@ -330,13 +339,23 @@ fn repository_root(folder: &Path) -> Result<Option<String>, String> {
         }
         return Err(command_error(&output));
     }
-    let path = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
-    let path = std::str::from_utf8(path)
+    let path = std::str::from_utf8(trim_newline(&output.stdout))
         .map_err(|_| "Git 仓库路径包含无法通过 UTF-8 传输的字符。".to_owned())?;
     if path.is_empty() || !Path::new(path).is_absolute() {
         return Err("Git 返回了无效的仓库根目录。".to_owned());
     }
     Ok(Some(path.to_owned()))
+}
+
+/// A single-line Git answer without its trailing newline.
+fn trim_newline(bytes: &[u8]) -> &[u8] {
+    bytes.strip_suffix(b"\n").unwrap_or(bytes)
+}
+
+/// A full ref name as Git prints it: under `refs/`, with no whitespace or
+/// control characters.
+fn valid_ref_name(name: &str) -> bool {
+    name.starts_with("refs/") && !name.bytes().any(|byte| byte <= b' ' || byte == 127)
 }
 
 fn parse_oid(bytes: &[u8]) -> Result<String, String> {
@@ -350,6 +369,14 @@ fn parse_oid(bytes: &[u8]) -> Result<String, String> {
     Ok(String::from_utf8(bytes.to_vec()).expect("hex object ID"))
 }
 
+/// A commit's parents: space-separated object IDs, empty for a root commit.
+fn parse_parents(bytes: &[u8]) -> Result<Vec<String>, String> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    bytes.split(|byte| *byte == b' ').map(parse_oid).collect()
+}
+
 fn parse_history_log(bytes: &[u8]) -> Result<Vec<GitCommit>, String> {
     if bytes.is_empty() {
         return Ok(Vec::new());
@@ -358,34 +385,26 @@ fn parse_history_log(bytes: &[u8]) -> Result<Vec<GitCommit>, String> {
         .strip_suffix(b"\0")
         .ok_or("Git 提交历史记录不完整。")?;
     let fields: Vec<_> = records.split(|byte| *byte == 0).collect();
-    let mut records = fields.chunks_exact(5);
-    let mut commits = Vec::new();
-    for record in &mut records {
-        let oid = parse_oid(record[0])?;
-        let parents = if record[1].is_empty() {
-            Vec::new()
-        } else {
-            record[1]
-                .split(|byte| *byte == b' ')
-                .map(parse_oid)
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let text = |bytes| {
-            std::str::from_utf8(bytes)
-                .map(str::to_owned)
-                .map_err(|_| "Git 提交历史包含无法通过 UTF-8 传输的字符。".to_owned())
-        };
+    // Each record is oid, parents, author name, author time, subject.
+    let (records, remainder) = fields.as_chunks::<5>();
+    let text = |bytes: &[u8]| {
+        std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| "Git 提交历史包含无法通过 UTF-8 传输的字符。".to_owned())
+    };
+    let mut commits = Vec::with_capacity(records.len());
+    for [oid, parents, author, time, subject] in records {
         commits.push(GitCommit {
-            oid,
-            parents,
-            author_name: text(record[2])?,
-            author_time: text(record[3])?
+            oid: parse_oid(oid)?,
+            parents: parse_parents(parents)?,
+            author_name: text(author)?,
+            author_time: text(time)?
                 .parse()
                 .map_err(|_| "Git 返回了无效的提交时间。".to_owned())?,
-            subject: text(record[4])?,
+            subject: text(subject)?,
         });
     }
-    if !records.remainder().is_empty() {
+    if !remainder.is_empty() {
         return Err("Git 提交历史记录不完整。".to_owned());
     }
     Ok(commits)
@@ -405,7 +424,7 @@ fn parse_history_refs(bytes: &[u8]) -> Result<Vec<GitRef>, String> {
         let [name, oid, object_type, peeled_oid, peeled_type, symref] = fields.as_slice() else {
             return Err("Git 返回了无效的引用记录。".to_owned());
         };
-        if !name.starts_with("refs/") || name.bytes().any(|byte| byte <= b' ' || byte == 127) {
+        if !valid_ref_name(name) {
             return Err("Git 返回了无效的引用名称。".to_owned());
         }
         let (kind, short_name) = if let Some(short) = name.strip_prefix("refs/heads/") {
@@ -470,13 +489,9 @@ fn read_history_snapshot(root: &Path) -> Result<HistorySnapshot, String> {
         DEADLINE,
     )?;
     let ref_name = if symbolic.status.success() {
-        let name = symbolic
-            .stdout
-            .strip_suffix(b"\n")
-            .unwrap_or(&symbolic.stdout);
-        let name = std::str::from_utf8(name)
+        let name = std::str::from_utf8(trim_newline(&symbolic.stdout))
             .map_err(|_| "Git HEAD 引用包含无法通过 UTF-8 传输的字符。".to_owned())?;
-        if !name.starts_with("refs/") || name.bytes().any(|byte| byte <= b' ' || byte == 127) {
+        if !valid_ref_name(name) {
             return Err("Git 返回了无效的 HEAD 引用。".to_owned());
         }
         Some(name.to_owned())
@@ -492,12 +507,7 @@ fn read_history_snapshot(root: &Path) -> Result<HistorySnapshot, String> {
         DEADLINE,
     )?;
     let oid = if resolved.status.success() {
-        Some(parse_oid(
-            resolved
-                .stdout
-                .strip_suffix(b"\n")
-                .unwrap_or(&resolved.stdout),
-        )?)
+        Some(parse_oid(trim_newline(&resolved.stdout))?)
     } else if resolved.status.code() == Some(1) && ref_name.is_some() {
         // An absent symbolic target is unborn. A present but invalid HEAD is an error.
         let unpeeled = run_git(
@@ -513,19 +523,14 @@ fn read_history_snapshot(root: &Path) -> Result<HistorySnapshot, String> {
     } else {
         return Err(command_error(&resolved));
     };
-    let refs = run_git(
+    let refs = git_output(
         git_command(root).args([
             "for-each-ref",
             "--sort=refname",
             "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(symref)%00",
         ]),
         HISTORY_OUTPUT_LIMIT,
-        false,
-        DEADLINE,
     )?;
-    if !refs.status.success() {
-        return Err(command_error(&refs));
-    }
     Ok(HistorySnapshot {
         head: GitHead { oid, ref_name },
         refs: refs.stdout,
@@ -556,10 +561,7 @@ fn read_history_commits(
         command.arg(oid);
     }
     command.arg("--");
-    let output = run_git(&mut command, HISTORY_OUTPUT_LIMIT, false, DEADLINE)?;
-    if !output.status.success() {
-        return Err(command_error(&output));
-    }
+    let output = git_output(&mut command, HISTORY_OUTPUT_LIMIT)?;
     parse_history_log(&output.stdout)
 }
 
@@ -622,14 +624,7 @@ fn parse_commit_message(bytes: &[u8], oid: &str) -> Result<(Vec<String>, String)
     if parse_oid(actual_oid)? != oid {
         return Err("Git 返回的提交 ID 与请求不一致。".to_owned());
     }
-    let parents = if parents.is_empty() {
-        Vec::new()
-    } else {
-        parents
-            .split(|byte| *byte == b' ')
-            .map(parse_oid)
-            .collect::<Result<Vec<_>, _>>()?
-    };
+    let parents = parse_parents(parents)?;
     let message = std::str::from_utf8(message)
         .map_err(|_| "Git 提交说明包含无法通过 UTF-8 传输的字符。".to_owned())?;
     Ok((parents, message.to_owned()))
@@ -722,7 +717,7 @@ fn commit_details_in(folder: &Path, oid: &str) -> Result<GitCommitDetails, Strin
     let oid = parse_oid(oid.as_bytes())?;
     let root = repository_root(folder)?.ok_or("当前目录不是 Git 仓库。")?;
     let root = Path::new(&root);
-    let output = run_git(
+    let output = git_output(
         git_command(root).args([
             "show",
             "-s",
@@ -737,12 +732,7 @@ fn commit_details_in(folder: &Path, oid: &str) -> Result<GitCommitDetails, Strin
             "--",
         ]),
         COMMIT_DETAILS_LIMIT,
-        false,
-        DEADLINE,
     )?;
-    if !output.status.success() {
-        return Err(command_error(&output));
-    }
     let (parents, message) = parse_commit_message(&output.stdout, &oid)?;
     let mut command = git_command(root);
     command.args([
@@ -761,10 +751,7 @@ fn commit_details_in(folder: &Path, oid: &str) -> Result<GitCommitDetails, Strin
         command.arg(parent);
     }
     command.args([&oid, "--"]);
-    let output = run_git(&mut command, COMMIT_DETAILS_LIMIT, false, DEADLINE)?;
-    if !output.status.success() {
-        return Err(command_error(&output));
-    }
+    let output = git_output(&mut command, COMMIT_DETAILS_LIMIT)?;
     let (files_changed, insertions, deletions) = parse_commit_numstat(&output.stdout)?;
     let origin = run_git(
         git_command(root).args(["config", "--local", "--get", "remote.origin.url"]),
@@ -904,7 +891,7 @@ fn status_in(folder: &Path) -> Result<GitStatus, String> {
             unstaged: Vec::new(),
         });
     };
-    let output = run_git(
+    let output = git_output(
         git_command(Path::new(&root)).args([
             "status",
             "--porcelain=v1",
@@ -915,12 +902,7 @@ fn status_in(folder: &Path) -> Result<GitStatus, String> {
             "--renames",
         ]),
         STATUS_LIMIT,
-        false,
-        DEADLINE,
     )?;
-    if !output.status.success() {
-        return Err(command_error(&output));
-    }
     parse_status(&output.stdout, root)
 }
 
@@ -1304,7 +1286,7 @@ mod tests {
             (Vec::new(), "subject\n\nbody\n".to_owned())
         );
         for invalid in [
-            valid[..valid.len() - 1].as_bytes().to_vec(),
+            valid.as_bytes()[..valid.len() - 1].to_vec(),
             format!("{oid}\0subject\0").into_bytes(),
             format!("{oid}\0invalid-parent\0subject\0").into_bytes(),
             format!("{}\0\0subject\0", "b".repeat(40)).into_bytes(),
@@ -1330,8 +1312,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             [&third, &second, &first]
         );
-        assert_eq!(history.commits[0].parents, [second.clone()]);
-        assert_eq!(history.commits[1].parents, [first.clone()]);
+        assert_eq!(history.commits[0].parents, [second.as_str()]);
+        assert_eq!(history.commits[1].parents, [first.as_str()]);
         assert!(history.commits[2].parents.is_empty());
         assert_eq!(history.commits[0].subject, "third");
         assert_eq!(history.commits[2].subject, "初始, commit");
@@ -1615,7 +1597,7 @@ mod tests {
         let parent = "b".repeat(40);
         let record = format!("{oid}\0{parent}\0作者, name\01700000000\0subject, 中文\0");
         let parsed = parse_history_log(record.as_bytes()).unwrap();
-        assert_eq!(parsed[0].parents, [parent.clone()]);
+        assert_eq!(parsed[0].parents, [parent.as_str()]);
         assert_eq!(parsed[0].author_time, 1_700_000_000);
         assert_eq!(parsed[0].subject, "subject, 中文");
         assert!(parse_history_log(b"").unwrap().is_empty());
@@ -1630,10 +1612,10 @@ mod tests {
             -1
         );
         for invalid in [
-            record[..record.len() - 1].as_bytes().to_vec(),
+            record.as_bytes()[..record.len() - 1].to_vec(),
             format!("{record}\0").into_bytes(),
             format!("{oid}\0{parent}\0author\01700000000\0").into_bytes(),
-            format!("short\0\0author\00\0subject\0").into_bytes(),
+            b"short\0\0author\x000\0subject\0".to_vec(),
             format!("{}\0\0author\00\0subject\0", "g".repeat(40)).into_bytes(),
             format!("{oid}\0{parent} \0author\00\0subject\0").into_bytes(),
             format!("{oid}\0bad-parent\0author\00\0subject\0").into_bytes(),
@@ -1659,8 +1641,8 @@ mod tests {
         );
         assert!(parse_history_refs(b"").unwrap().is_empty());
         for invalid in [
-            record[..record.len() - 1].as_bytes().to_vec(),
-            record[..record.len() - 2].as_bytes().to_vec(),
+            record.as_bytes()[..record.len() - 1].to_vec(),
+            record.as_bytes()[..record.len() - 2].to_vec(),
             format!("{record}\n").into_bytes(),
             format!("refs/heads/main\0{oid}\0commit\0\0\0\n").into_bytes(),
             format!("refs/heads/\0{oid}\0commit\0\0\0\0\n").into_bytes(),
