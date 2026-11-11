@@ -135,10 +135,10 @@ impl Settings {
     }
 
     pub fn resolve_claude_path(&self) -> Result<String, String> {
-        if let Some(p) = &self.claude_path {
-            if !p.trim().is_empty() {
-                return Ok(p.clone());
-            }
+        if let Some(p) = &self.claude_path
+            && !p.trim().is_empty()
+        {
+            return Ok(p.clone());
         }
         if let Some(home) = dirs::home_dir() {
             let candidate = home.join(".local/bin/claude");

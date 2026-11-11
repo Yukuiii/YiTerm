@@ -13,7 +13,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, ipc::Channel, State};
+use tauri::{AppHandle, State, ipc::Channel};
 use tokio::io::AsyncWriteExt;
 
 use crate::state::AppState;
@@ -235,7 +235,10 @@ fn install_blocking(app: &AppHandle, dmg: &std::path::Path) -> Result<(), String
         return Err("开发模式不支持自动安装，请手动安装 DMG".into());
     };
     // Running from the DMG's translocated copy: replacing that copy is useless.
-    if bundle.components().any(|c| c.as_os_str() == "AppTranslocation") {
+    if bundle
+        .components()
+        .any(|c| c.as_os_str() == "AppTranslocation")
+    {
         open_dmg(dmg);
         return Err("请把 YiTerm 拖入 Applications 后再使用自动更新（已打开 DMG）".into());
     }
@@ -258,14 +261,12 @@ fn install_blocking(app: &AppHandle, dmg: &std::path::Path) -> Result<(), String
         ));
     }
 
-    let source = std::fs::read_dir(&mount)
-        .ok()
-        .and_then(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .map(|e| e.path())
-                .find(|p| p.extension().is_some_and(|e| e == "app"))
-        });
+    let source = std::fs::read_dir(&mount).ok().and_then(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e == "app"))
+    });
     let Some(source) = source else {
         hdiutil_detach(&mount);
         return Err("DMG 中未找到 YiTerm.app".into());
@@ -290,7 +291,9 @@ fn install_blocking(app: &AppHandle, dmg: &std::path::Path) -> Result<(), String
         hdiutil_detach(&mount);
         let _ = std::fs::remove_dir_all(&stage);
         open_dmg(dmg);
-        return Err(format!("无法替换应用（{e}），已打开 DMG，请手动拖入 Applications"));
+        return Err(format!(
+            "无法替换应用（{e}），已打开 DMG，请手动拖入 Applications"
+        ));
     }
     let copied = Command::new("/usr/bin/ditto")
         .arg(&stage)
@@ -368,7 +371,10 @@ mod tests {
         .await
         .expect("download");
         let len = tokio::fs::metadata(&path).await.expect("file").len();
-        eprintln!("downloaded {len} bytes (last progress {last}) from {}", info.asset_url);
+        eprintln!(
+            "downloaded {len} bytes (last progress {last}) from {}",
+            info.asset_url
+        );
         assert!(len > 1_000_000);
         tokio::fs::remove_dir_all(&dir).await.ok();
     }

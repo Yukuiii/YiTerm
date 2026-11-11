@@ -1,8 +1,8 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc, Mutex, RwLock,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -18,7 +18,8 @@ use crate::{
 pub struct AppState {
     pub terms: RwLock<HashMap<u64, Arc<crate::terminal::TerminalHandle>>>,
     pub convs: RwLock<HashMap<String, Conversation>>,
-    /// Follower tasks per conversation id, so they can be aborted on delete.
+    /// Follower tasks per conversation id, so they can be aborted when the
+    /// terminal is restarted or reclaimed.
     pub followers: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     /// conv id → a turn is running (derived from the JSONL transcript). The
     /// idle-terminal reclaimer never evicts a busy conversation.
@@ -118,15 +119,15 @@ fn macos_system_proxies() -> Option<Vec<reqwest::Proxy>> {
     // SOCKS proxy would need reqwest's "socks" feature; HTTP/HTTPS proxies
     // (Clash/Surge mixed ports serve both) are sufficient here.
     let mut proxies = Vec::new();
-    if let Some(addr) = parsed.http {
-        if let Ok(p) = reqwest::Proxy::http(&addr) {
-            proxies.push(p);
-        }
+    if let Some(addr) = parsed.http
+        && let Ok(p) = reqwest::Proxy::http(&addr)
+    {
+        proxies.push(p);
     }
-    if let Some(addr) = parsed.https {
-        if let Ok(p) = reqwest::Proxy::https(&addr) {
-            proxies.push(p);
-        }
+    if let Some(addr) = parsed.https
+        && let Ok(p) = reqwest::Proxy::https(&addr)
+    {
+        proxies.push(p);
     }
     (!proxies.is_empty()).then_some(proxies)
 }

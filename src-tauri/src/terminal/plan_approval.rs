@@ -599,10 +599,10 @@ fn plan_menu_options(
             if feedback || option.digit != b'1' + options.len() as u8 {
                 return None;
             }
-            if let Some(prev) = options.last() {
-                if !ordinary_label(&prev.label) {
-                    return None;
-                }
+            if let Some(prev) = options.last()
+                && !ordinary_label(&prev.label)
+            {
+                return None;
             }
             // Once the exact ordinary rows include manual approval, an
             // additional focused input row can contain arbitrary feedback,
@@ -757,7 +757,7 @@ pub(crate) mod tests {
                 t.feed_output(&menu_bytes(false));
             }
             observe(&mut t, &call("old"), 10);
-            assert_eq!(t.candidate.as_ref().unwrap().historical, true);
+            assert!(t.candidate.as_ref().unwrap().historical);
             observe(
                 &mut t,
                 &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"old","is_error":true}]}}),

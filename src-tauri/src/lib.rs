@@ -13,7 +13,7 @@ use tauri::Manager;
 use tracing_subscriber::layer::SubscriberExt;
 
 pub fn run() {
-    let app = tauri::Builder::default()
+    tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -58,11 +58,11 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-
-    let _ = app;
 }
 
-static _LOG_GUARD: OnceLock<()> = OnceLock::new();
+/// Holds the non-blocking log writer's guard for the process lifetime: dropping
+/// it would stop the writer thread and silently truncate the log file.
+static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
 fn init_logging(app: tauri::AppHandle) {
     let log_dir = dirs::home_dir()
@@ -71,10 +71,7 @@ fn init_logging(app: tauri::AppHandle) {
     let _ = std::fs::create_dir_all(&log_dir);
     let file_appender = tracing_appender::rolling::daily(log_dir, "yiterm.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-    // Keep the guard alive for the process lifetime.
-    _LOG_GUARD.get_or_init(|| {
-        std::mem::forget(guard);
-    });
+    let _ = LOG_GUARD.set(guard);
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let stdout_layer = tracing_subscriber::fmt::layer()
