@@ -9,6 +9,7 @@ use crate::{
     terminal::{
         TerminalHandle,
         plan_approval::{PlanApprovalStatus, PlanExecutionMode, TranscriptBoundary},
+        unix_millis,
     },
     translate::{self, Direction, TranslateEvent},
 };
@@ -133,79 +134,70 @@ fn pick_eviction(
     candidates.first().map(|t| (t.id, t.conv_id.clone()))
 }
 
+/// The live terminal already bound to a conversation, if any. Scanning `terms`
+/// (not just `conv.terminal_id`) also self-heals stale links and guards
+/// against concurrent duplicate starts.
+fn live_terminal(state: &AppState, conv_id: &str) -> Option<TerminalStartInfo> {
+    let terms = state.terms.read().unwrap();
+    let terminal = terms
+        .values()
+        .find(|t| t.conv_id == conv_id && !t.is_exited())?;
+    Some(TerminalStartInfo {
+        conversation_id: terminal.conv_id.clone(),
+        terminal_id: terminal.id,
+        session_id: terminal.session_id.clone(),
+        command: terminal.command.clone(),
+        resumed: true,
+        evicted_conversation_ids: Vec::new(),
+    })
+}
+
+/// The stored conversation, or one adopted from Claude's own records: a session
+/// not created in YiTerm is adopted on first open so the rest of the lifecycle
+/// is unchanged.
+fn conversation_to_start(state: &AppState, conv_id: &str) -> Result<Conversation, String> {
+    let stored = state.convs.read().unwrap().get(conv_id).cloned();
+    if let Some(conv) = stored {
+        return Ok(conv);
+    }
+    let home = dirs::home_dir().ok_or("no home dir")?;
+    let conv = sessions::claude::find_session(&home, conv_id)
+        .ok_or("conversation not found")?
+        .into_conversation();
+    state
+        .convs
+        .write()
+        .unwrap()
+        .insert(conv.id.clone(), conv.clone());
+    Ok(conv)
+}
+
+/// The directory `claude` runs in. Imported sessions must run in the exact cwd
+/// Claude recorded: that string is what its project directory name is derived
+/// from, so canonicalizing it can make `--resume` look in a different project.
+fn workspace_folder(conv: &Conversation) -> Result<String, String> {
+    if conv.imported {
+        if !std::path::Path::new(&conv.folder).is_dir() {
+            return Err(format!("project folder {:?} no longer exists", conv.folder));
+        }
+        return Ok(conv.folder.clone());
+    }
+    std::fs::canonicalize(&conv.folder)
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|e| format!("folder {:?}: {e}", conv.folder))
+}
+
 #[tauri::command]
 pub async fn terminal_start(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     req: TerminalStartRequest,
 ) -> Result<TerminalStartInfo, String> {
-    // Existing live terminal bound to this conversation? Return it.
-    // Scanning `terms` (not just conv.terminal_id) also self-heals stale
-    // links and guards against concurrent duplicate starts.
-    {
-        let terms = state.terms.read().unwrap();
-        let alive = terms
-            .values()
-            .find(|t| t.conv_id == req.conversation_id && !*t.exited.lock().unwrap());
-        if let Some(t) = alive {
-            return Ok(TerminalStartInfo {
-                conversation_id: t.conv_id.clone(),
-                terminal_id: t.id,
-                session_id: t.session_id.clone(),
-                command: t.command.clone(),
-                resumed: true,
-                evicted_conversation_ids: Vec::new(),
-            });
-        }
+    if let Some(info) = live_terminal(&state, &req.conversation_id) {
+        return Ok(info);
     }
-
-    // A conversation not created in YiTerm comes from Claude's own records;
-    // adopt it on first open so the rest of the lifecycle is unchanged.
-    let existing = {
-        state
-            .convs
-            .read()
-            .unwrap()
-            .get(&req.conversation_id)
-            .cloned()
-    };
-    let conv = match existing {
-        Some(conv) => conv,
-        None => {
-            let home = dirs::home_dir().ok_or("no home dir")?;
-            let found = sessions::claude::find_session(&home, &req.conversation_id)
-                .ok_or("conversation not found")?;
-            let conv = Conversation {
-                id: found.session_id.clone(),
-                folder: found.folder,
-                session_id: found.session_id,
-                terminal_id: None,
-                title: found.title,
-                created_at: found.modified_ms.to_string(),
-                imported: true,
-            };
-            state
-                .convs
-                .write()
-                .unwrap()
-                .insert(conv.id.clone(), conv.clone());
-            conv
-        }
-    };
-    // Imported sessions must run in the exact cwd Claude recorded: that string
-    // is what its project directory name is derived from, so canonicalizing it
-    // can make `--resume` look in a different project.
-    let folder = if conv.imported {
-        if !std::path::Path::new(&conv.folder).is_dir() {
-            return Err(format!("project folder {:?} no longer exists", conv.folder));
-        }
-        conv.folder.clone()
-    } else {
-        std::fs::canonicalize(&conv.folder)
-            .map_err(|e| format!("folder {:?}: {e}", conv.folder))?
-            .to_string_lossy()
-            .into_owned()
-    };
+    let conv = conversation_to_start(&state, &req.conversation_id)?;
+    let folder = workspace_folder(&conv)?;
 
     let claude_path = state.settings.read().unwrap().resolve_claude_path()?;
     let session_id = conv.session_id.clone();
@@ -303,13 +295,7 @@ pub fn terminal_write(
     text: String,
     submit: bool,
 ) -> Result<(), String> {
-    let handle = state
-        .terms
-        .read()
-        .unwrap()
-        .get(&id)
-        .cloned()
-        .ok_or("terminal not found")?;
+    let handle = terminal_handle(&state, id)?;
     handle.write(&text, submit)?;
 
     // Esc is Claude Code's interrupt key. When the abort happens before the
@@ -370,8 +356,7 @@ pub fn terminal_write(
 /// One composer turn: text plus any pasted image paths.
 ///
 /// Async because an image paste has to settle inside Claude Code before Enter
-/// goes out — see `TerminalHandle::send_prompt`. The terminal handle is cloned
-/// out of the lock so no std guard is held across an await.
+/// goes out — see `TerminalHandle::send_prompt`.
 #[tauri::command]
 pub async fn terminal_send_prompt(
     state: State<'_, AppState>,
@@ -379,13 +364,7 @@ pub async fn terminal_send_prompt(
     text: String,
     image_paths: Vec<String>,
 ) -> Result<(), String> {
-    let handle = state
-        .terms
-        .read()
-        .unwrap()
-        .get(&id)
-        .cloned()
-        .ok_or("terminal not found")?;
+    let handle = terminal_handle(&state, id)?;
     handle.send_prompt(&text, &image_paths).await
 }
 
@@ -488,19 +467,24 @@ pub fn terminal_kill(state: State<'_, AppState>, id: u64) -> Result<(), String> 
     })
 }
 
-fn with_terminal(
-    state: &AppState,
-    id: u64,
-    f: impl FnOnce(&TerminalHandle) -> Result<(), String>,
-) -> Result<(), String> {
-    let handle = state
+/// Clones the handle out of the registry so no `std` guard is held while the
+/// caller writes to the PTY or awaits.
+fn terminal_handle(state: &AppState, id: u64) -> Result<Arc<TerminalHandle>, String> {
+    state
         .terms
         .read()
         .unwrap()
         .get(&id)
         .cloned()
-        .ok_or("terminal not found")?;
-    f(&handle)
+        .ok_or_else(|| "terminal not found".to_string())
+}
+
+fn with_terminal(
+    state: &AppState,
+    id: u64,
+    f: impl FnOnce(&TerminalHandle) -> Result<(), String>,
+) -> Result<(), String> {
+    f(terminal_handle(state, id)?.as_ref())
 }
 
 // ---------- conversations ----------
@@ -571,7 +555,9 @@ pub fn conversations_create(
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| folder.clone())
         }),
-        created_at: now_iso(),
+        // Unix millis, like imported sessions' transcript mtime: the sidebar
+        // orders both kinds newest-first by this value.
+        created_at: unix_millis().to_string(),
         imported: false,
     };
     state
@@ -600,12 +586,10 @@ pub fn current_user() -> String {
 
 // ---------- chat history persistence (opaque JSON owned by the frontend) ----------
 
-/// conv ids are UUIDs we generate; reject anything path-ish defensively.
+/// Conversation ids are UUIDs we generate (or adopted session ids) that also
+/// name chat-cache files and image directories; reject anything path-ish.
 fn valid_conv_id(conv_id: &str) -> bool {
-    !conv_id.is_empty()
-        && conv_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    sessions::claude::valid_session_id(conv_id)
 }
 
 fn chat_path(
@@ -692,15 +676,16 @@ fn validate_image(conv_id: &str, mime: &str, bytes: &[u8]) -> Result<&'static st
         return Err("图片为空".into());
     }
     if bytes.len() > MAX_IMAGE_BYTES {
-        return Err(format!(
-            "图片过大（上限 {} MB）",
-            MAX_IMAGE_BYTES / (1024 * 1024)
-        ));
+        return Err(image_too_large());
     }
     let sniffed = sniff_image_mime(bytes)
         .ok_or_else(|| format!("不支持的图片格式 {mime}（仅支持 PNG/JPEG/GIF/WebP）"))?;
     // Content wins over the label; `mime` only shapes the error message.
     Ok(image_extension(sniffed).expect("sniffed type is always supported"))
+}
+
+fn image_too_large() -> String {
+    format!("图片过大（上限 {} MB）", MAX_IMAGE_BYTES / (1024 * 1024))
 }
 
 /// Pasted screenshots live in the app cache dir, scoped to their conversation.
@@ -782,10 +767,7 @@ pub fn chat_attachment_import(
     }
     if let Some(mime) = sniff_image_mime(&head[..filled]) {
         if meta.len() > MAX_IMAGE_BYTES as u64 {
-            return Err(format!(
-                "图片过大（上限 {} MB）",
-                MAX_IMAGE_BYTES / (1024 * 1024)
-            ));
+            return Err(image_too_large());
         }
         let ext = image_extension(mime).expect("sniffed type is always supported");
         let dir = images_dir(&state, &app, &conv_id);
@@ -803,18 +785,6 @@ pub fn chat_attachment_import(
         path,
         name,
     })
-}
-
-/// Unix millis — enough for stable newest-first ordering.
-fn unix_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-fn now_iso() -> String {
-    format!("{}", unix_millis())
 }
 
 // ---------- settings ----------
@@ -880,17 +850,16 @@ pub async fn translate(
             if settings.translation.mode == "local" {
                 return translate::local::translate(&app, &state, direction, &text, &request_id, &channel).await;
             }
+            // DeepL has its own key slot; chat mode keys are per provider.
+            let api_key = match settings.translation.mode.as_str() {
+                "deepl" => crate::settings::api_key_get(&state.config_dir(&app), "deepl"),
+                "chat" => crate::settings::api_key_get(
+                    &state.config_dir(&app),
+                    &settings.translation.chat_provider,
+                ),
+                _ => None,
+            };
             let http = state.http.clone();
-            let key_provider = if settings.translation.mode == "deepl" {
-                "deepl".to_string()
-            } else {
-                settings.translation.chat_provider.clone()
-            };
-            let api_key = if matches!(settings.translation.mode.as_str(), "chat" | "deepl") {
-                crate::settings::api_key_get(&state.config_dir(&app), &key_provider)
-            } else {
-                None
-            };
             translate::run(
                 &http,
                 &settings.translation,
@@ -1127,5 +1096,37 @@ mod tests {
         assert!(!is_interrupt_key("\x1b[200~")); // bracketed paste start
         assert!(!is_interrupt_key("\x03")); // Ctrl-C
         assert!(!is_interrupt_key(""));
+    }
+
+    fn conversation(folder: &str, imported: bool) -> Conversation {
+        Conversation {
+            id: "conv".into(),
+            session_id: "sess".into(),
+            terminal_id: None,
+            folder: folder.into(),
+            title: "mock".into(),
+            created_at: "0".into(),
+            imported,
+        }
+    }
+
+    #[test]
+    fn workspace_folder_keeps_imported_paths_verbatim_and_canonicalizes_owned_ones() {
+        let dir = std::env::temp_dir().join(format!("yiterm-ws-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A non-canonical spelling of an existing directory: canonicalizing it
+        // would change the project directory name Claude derives from the cwd.
+        let raw = format!("{}/.", dir.display());
+        assert_eq!(workspace_folder(&conversation(&raw, true)), Ok(raw.clone()));
+        let owned = workspace_folder(&conversation(&raw, false)).unwrap();
+        assert_ne!(owned, raw);
+        assert_eq!(
+            owned,
+            std::fs::canonicalize(&dir).unwrap().to_string_lossy()
+        );
+
+        let missing = dir.join("gone");
+        assert!(workspace_folder(&conversation(&missing.to_string_lossy(), true)).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

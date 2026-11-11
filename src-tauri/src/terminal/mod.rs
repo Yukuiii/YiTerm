@@ -60,7 +60,7 @@ pub struct TerminalHandle {
     pub folder: String,
     pub command: String,
     pub started_at_ms: i64,
-    pub exited: Mutex<bool>,
+    exited: AtomicBool,
     /// Shared with the transcript follower; thinking and tool calls count as replies.
     pub assistant_since_prompt: Arc<AtomicBool>,
     pub plan_approval: Arc<Mutex<PlanApprovalTracker>>,
@@ -161,7 +161,7 @@ impl TerminalHandle {
             .take_writer()
             .map_err(|e| format!("take writer: {e}"))?;
 
-        let started_at_ms = chrono_millis();
+        let started_at_ms = unix_millis();
 
         let handle = Arc::new(Self {
             id,
@@ -170,10 +170,10 @@ impl TerminalHandle {
             folder,
             command,
             started_at_ms,
-            exited: Mutex::new(false),
+            exited: AtomicBool::new(false),
             assistant_since_prompt: Arc::new(AtomicBool::new(false)),
             plan_approval,
-            last_output_ms: AtomicI64::new(chrono_millis()),
+            last_output_ms: AtomicI64::new(unix_millis()),
             backlog: Mutex::new(Backlog::new(RING_CAP)),
             subs: Mutex::new(Vec::new()),
             writer: Mutex::new(Some(writer)),
@@ -321,8 +321,7 @@ impl TerminalHandle {
                 tokio::time::sleep(IMAGE_ATTACH_SETTLE).await;
                 return true;
             }
-            let exited = *self.exited.lock().unwrap_or_else(|e| e.into_inner());
-            if exited || start.elapsed() >= timeout {
+            if self.is_exited() || start.elapsed() >= timeout {
                 return false;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -355,13 +354,11 @@ impl TerminalHandle {
 
     pub fn kill(&self) {
         self.retire();
-        if let Ok(mut exited) = self.exited.lock() {
-            *exited = true;
-        }
-        if let Ok(mut guard) = self.child.lock() {
-            if let Some(child) = guard.as_mut() {
-                let _ = child.kill();
-            }
+        self.exited.store(true, Ordering::SeqCst);
+        if let Ok(mut guard) = self.child.lock()
+            && let Some(child) = guard.as_mut()
+        {
+            let _ = child.kill();
         }
     }
 
@@ -371,14 +368,18 @@ impl TerminalHandle {
     }
 
     pub fn is_exited(&self) -> bool {
-        *self.exited.lock().unwrap_or_else(|e| e.into_inner())
+        self.exited.load(Ordering::SeqCst)
     }
 
-    pub fn exit_code(&self) -> Option<Option<i32>> {
-        self.child.lock().ok().and_then(|mut g| {
-            g.as_mut()
-                .map(|c| c.wait().ok().map(|s| s.exit_code() as i32))
-        })
+    /// The child's exit code, once it has been reaped.
+    pub fn exit_code(&self) -> Option<i32> {
+        self.child
+            .lock()
+            .ok()?
+            .as_mut()?
+            .wait()
+            .ok()
+            .map(|status| status.exit_code() as i32)
     }
 
     /// Replay the backlog into `channel` then subscribe it for live data.
@@ -389,14 +390,15 @@ impl TerminalHandle {
     /// (no gaps, no duplicates).
     pub fn attach(&self, seq: u64, channel: Channel<TerminalEvent>) {
         let mut subs = self.subs.lock().unwrap();
-        let (reset, bytes) = {
+        let (reset, bytes, written) = {
             let backlog = self.backlog.lock().unwrap();
-            backlog.replay_after(seq)
+            let (reset, bytes) = backlog.replay_after(seq);
+            (reset, bytes, backlog.written())
         };
         if !bytes.is_empty() {
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
             let _ = channel.send(TerminalEvent::Data {
-                seq: self.backlog.lock().unwrap().written(),
+                seq: written,
                 b64,
                 reset,
             });
@@ -406,9 +408,8 @@ impl TerminalHandle {
     }
 
     fn append_and_broadcast(&self, bytes: &[u8]) {
-        self.last_output_ms
-            .store(chrono_millis(), Ordering::Relaxed);
-        // Caller holds `subs` lock; lock order is always subs → backlog.
+        self.last_output_ms.store(unix_millis(), Ordering::Relaxed);
+        // Lock order is always subs → backlog (see `attach`).
         let mut subs = self.subs.lock().unwrap();
         let seq = {
             let mut backlog = self.backlog.lock().unwrap();
@@ -428,9 +429,7 @@ impl TerminalHandle {
 
     fn broadcast_exit(&self, code: Option<i32>) {
         self.retire();
-        if let Ok(mut exited) = self.exited.lock() {
-            *exited = true;
-        }
+        self.exited.store(true, Ordering::SeqCst);
         if let Ok(mut subs) = self.subs.lock() {
             subs.retain(|c| c.send(TerminalEvent::Exit { code }).is_ok());
             subs.clear();
@@ -500,7 +499,9 @@ fn image_attach_marker(bytes: &[u8]) -> bool {
     plain.windows(7).any(|w| w == b"[Image#")
 }
 
-fn chrono_millis() -> i64 {
+/// Unix millis — the clock shared by PTY output stamps, terminal start times
+/// and conversation creation times.
+pub(crate) fn unix_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -562,7 +563,7 @@ fn spawn_reader_thread(handle: Arc<TerminalHandle>, mut reader: Box<dyn Read + S
                     }
                     let code = handle.exit_code();
                     tracing::info!(terminal = handle.id, ?code, "terminal exited");
-                    handle.broadcast_exit(code.flatten());
+                    handle.broadcast_exit(code);
                     break;
                 }
             }
@@ -604,7 +605,7 @@ pub(crate) mod tests {
                 folder: "/tmp".into(),
                 command: "mock".into(),
                 started_at_ms: 0,
-                exited: Mutex::new(false),
+                exited: AtomicBool::new(false),
                 assistant_since_prompt: Arc::new(AtomicBool::new(false)),
                 plan_approval: Arc::new(Mutex::new(tracker())),
                 last_output_ms: AtomicI64::new(0),
