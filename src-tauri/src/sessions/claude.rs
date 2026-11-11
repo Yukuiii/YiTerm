@@ -40,8 +40,38 @@ pub fn valid_session_id(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
+impl ClaudeSession {
+    /// The conversation YiTerm shows for a session it did not create; the
+    /// session id doubles as the conversation id.
+    pub fn into_conversation(self) -> Conversation {
+        Conversation {
+            id: self.session_id.clone(),
+            folder: self.folder,
+            session_id: self.session_id,
+            terminal_id: None,
+            title: self.title,
+            created_at: self.modified_ms.to_string(),
+            imported: true,
+        }
+    }
+}
+
 fn projects_root(home: &Path) -> PathBuf {
     home.join(".claude").join("projects")
+}
+
+/// Project directories under `~/.claude/projects`, sorted for stable output.
+fn project_dirs(home: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(projects_root(home)) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+    dirs
 }
 
 fn munge_map(projects: &[String]) -> HashMap<String, String> {
@@ -82,21 +112,10 @@ pub fn projects(home: &Path) -> Vec<String> {
 /// ignored. Files with no resolvable workspace folder are skipped — there is
 /// nowhere to run `claude --resume`.
 pub fn sessions(home: &Path, projects: &[String]) -> Vec<ClaudeSession> {
-    let root = projects_root(home);
-    let Ok(entries) = std::fs::read_dir(&root) else {
-        return Vec::new();
-    };
     let registered = munge_map(projects);
-    let mut dirs: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    dirs.sort();
-
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for dir in dirs {
+    for dir in project_dirs(home) {
         let dir_name = dir
             .file_name()
             .and_then(|n| n.to_str())
@@ -119,21 +138,33 @@ pub fn sessions(home: &Path, projects: &[String]) -> Vec<ClaudeSession> {
             if !valid_session_id(session_id) || seen.contains(session_id) {
                 continue;
             }
-            let (cwd, title) = read_meta(&path).unwrap_or((None, None));
-            let Some(folder) = resolve_folder(cwd, &dir_name, &registered) else {
+            let Some(session) = read_session(&path, &dir_name, &registered) else {
                 tracing::debug!(?path, "session has no resolvable workspace folder");
                 continue;
             };
-            seen.insert(session_id.to_string());
-            out.push(ClaudeSession {
-                session_id: session_id.to_string(),
-                title: title.unwrap_or_else(|| folder_name(&folder)),
-                folder,
-                modified_ms: modified_ms(&path),
-            });
+            seen.insert(session.session_id.clone());
+            out.push(session);
         }
     }
     out
+}
+
+/// One session record for a transcript path, or `None` when its workspace
+/// folder cannot be resolved (there is nowhere to run `claude --resume`).
+fn read_session(
+    path: &Path,
+    dir_name: &str,
+    registered: &HashMap<String, String>,
+) -> Option<ClaudeSession> {
+    let session_id = path.file_stem().and_then(|s| s.to_str())?.to_string();
+    let (cwd, title) = read_meta(path).unwrap_or((None, None));
+    let folder = resolve_folder(cwd, dir_name, registered)?;
+    Some(ClaudeSession {
+        title: title.unwrap_or_else(|| folder_name(&folder)),
+        folder,
+        session_id,
+        modified_ms: modified_ms(path),
+    })
 }
 
 /// Resolves the actual transcript path for a session id. Prefers the path
@@ -161,26 +192,13 @@ pub fn find_session(home: &Path, session_id: &str) -> Option<ClaudeSession> {
         .and_then(|n| n.to_str())
         .unwrap_or_default()
         .to_string();
-    let (cwd, title) = read_meta(&path).unwrap_or((None, None));
     let registered = munge_map(&projects(home));
-    let folder = resolve_folder(cwd, &dir_name, &registered)?;
-    Some(ClaudeSession {
-        session_id: session_id.to_string(),
-        title: title.unwrap_or_else(|| folder_name(&folder)),
-        folder,
-        modified_ms: modified_ms(&path),
-    })
+    read_session(&path, &dir_name, &registered)
 }
 
 fn find_jsonl(home: &Path, session_id: &str) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(projects_root(home)).ok()?;
-    let mut dirs: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    dirs.sort();
-    dirs.into_iter()
+    project_dirs(home)
+        .into_iter()
         .map(|d| d.join(format!("{session_id}.jsonl")))
         .find(|p| p.is_file())
 }
@@ -310,15 +328,7 @@ pub fn merge(stored: Vec<Conversation>, found: Vec<ClaudeSession>) -> Vec<Conver
         if !known.insert(s.session_id.clone()) {
             continue;
         }
-        list.push(Conversation {
-            id: s.session_id.clone(),
-            folder: s.folder,
-            session_id: s.session_id,
-            terminal_id: None,
-            title: s.title,
-            created_at: s.modified_ms.to_string(),
-            imported: true,
-        });
+        list.push(s.into_conversation());
     }
     list.sort_by(|a, b| {
         let am = a.created_at.parse::<u64>().unwrap_or(0);

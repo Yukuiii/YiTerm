@@ -92,12 +92,12 @@ fn truncate_label(s: &str, max: usize) -> String {
 /// One-line label for the step list: prefer the tool's human `description`,
 /// then the most meaningful input (command/path/pattern), then the tool name.
 fn summarize_tool_label(input: Option<&Value>, name: &str) -> String {
-    if let Some(obj) = input.and_then(Value::as_object) {
-        if let Some(desc) = obj.get("description").and_then(Value::as_str) {
-            let desc = desc.trim();
-            if !desc.is_empty() {
-                return truncate_label(desc, TOOL_LABEL_MAX);
-            }
+    if let Some(obj) = input.and_then(Value::as_object)
+        && let Some(desc) = obj.get("description").and_then(Value::as_str)
+    {
+        let desc = desc.trim();
+        if !desc.is_empty() {
+            return truncate_label(desc, TOOL_LABEL_MAX);
         }
     }
     let detail = summarize_tool_input(input);
@@ -225,219 +225,230 @@ pub fn parse_line(v: &Value) -> Vec<ChatMsg> {
         .map(|s| s.to_string());
 
     match line_type {
-        "user" => {
-            if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
-                return Vec::new();
-            }
-            if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
-                return Vec::new();
-            }
-            // Array content = tool results, or a prompt that carried images.
-            if let Some(blocks) = message.get("content").and_then(Value::as_array) {
-                let mut out = Vec::new();
-                for block in blocks {
-                    if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-                        continue;
-                    }
-                    let call_id = block
-                        .get("tool_use_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    if call_id.is_empty() {
-                        continue;
-                    }
-                    let is_error = block
-                        .get("is_error")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    let text = extract_result_text(block.get("content"));
-                    out.push(ChatMsg {
-                        key: format!("tr-{call_id}"),
-                        role: Role::User,
-                        text: String::new(),
-                        thinking: None,
-                        tool_calls: Vec::new(),
-                        tool_result: Some(ToolResult {
-                            call_id,
-                            is_error,
-                            text: truncate_chars(&text, TOOL_RESULT_MAX),
-                        }),
-                        ts: ts.clone(),
-                        done: true,
-                        interrupted: false,
-                    });
-                }
-                if !out.is_empty() {
-                    return out;
-                }
-                // A prompt with pasted screenshots is stored as an array of
-                // text + image blocks (e.g. "[Image #1] Take a look"). It must
-                // surface as a user turn: unlike a plain-text prompt, the
-                // frontend's optimistic bubble is the only other copy, and it
-                // is not recreated from anywhere else. Claude Code also writes
-                // a model-facing echo of the same turn ("[Image: source: …]")
-                // that has no image block — that one is skipped.
-                let has_image = blocks
-                    .iter()
-                    .any(|b| b.get("type").and_then(Value::as_str) == Some("image"));
-                if !has_image {
-                    return Vec::new();
-                }
-                let text = blocks
-                    .iter()
-                    .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-                    .filter_map(|b| b.get("text").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let mut text = text.trim().to_string();
-                // An image-only prompt may carry no text block at all; keep a
-                // marker so the turn still reaches the mirror.
-                if text.is_empty() {
-                    text = "[Image #1]".to_string();
-                }
-                let Some(key) = v.get("uuid").and_then(Value::as_str) else {
-                    return Vec::new();
-                };
-                if is_interrupt_marker(&text)
-                    || SKIP_USER_PREFIXES.iter().any(|p| text.starts_with(p))
-                {
-                    return Vec::new();
-                }
-                return vec![ChatMsg {
-                    key: key.to_string(),
-                    role: Role::User,
-                    text: text.to_string(),
-                    thinking: None,
-                    tool_calls: Vec::new(),
-                    tool_result: None,
-                    ts,
-                    done: true,
-                    interrupted: false,
-                }];
-            }
-            // String content = a real prompt.
-            let Some(raw) = message.get("content").and_then(Value::as_str) else {
-                return Vec::new();
-            };
-            let text = raw.trim();
-            if text.is_empty()
-                || is_interrupt_marker(text)
-                || SKIP_USER_PREFIXES.iter().any(|p| text.starts_with(p))
-            {
-                return Vec::new();
-            }
-            let Some(key) = v.get("uuid").and_then(Value::as_str) else {
-                return Vec::new();
-            };
-            vec![ChatMsg {
-                key: key.to_string(),
-                role: Role::User,
-                text: text.to_string(),
-                thinking: None,
-                tool_calls: Vec::new(),
-                tool_result: None,
-                ts,
-                done: true,
-                interrupted: false,
-            }]
-        }
-        "assistant" => {
-            if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
-                return Vec::new();
-            }
-            // Claude Code synthesizes this placeholder locally when a request
-            // is aborted or queued without an API response; its own UI hides
-            // it, so the mirror should not show "无需回复。".
-            if is_synthetic_no_response(message) {
-                return Vec::new();
-            }
-            let Some(key) = message
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| v.get("uuid").and_then(Value::as_str).map(str::to_string))
-            else {
-                return Vec::new();
-            };
-            let mut text = String::new();
-            let mut plans = Vec::new();
-            let mut thinking = None;
-            let mut tool_calls = Vec::new();
-            if let Some(blocks) = message.get("content").and_then(Value::as_array) {
-                for block in blocks {
-                    match block.get("type").and_then(Value::as_str) {
-                        Some("text") => {
-                            if let Some(t) = block.get("text").and_then(Value::as_str) {
-                                if !text.is_empty() {
-                                    text.push('\n');
-                                }
-                                text.push_str(t);
-                            }
-                        }
-                        Some("thinking") => {
-                            if let Some(t) = block.get("thinking").and_then(Value::as_str) {
-                                thinking = Some(t.to_string());
-                            }
-                        }
-                        Some("tool_use") => {
-                            let name = block
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or("tool")
-                                .to_string();
-                            let id = block
-                                .get("id")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .to_string();
-                            if name == "ExitPlanMode"
-                                && let Some(plan) = block
-                                    .pointer("/input/plan")
-                                    .and_then(Value::as_str)
-                                    .filter(|plan| !plan.trim().is_empty())
-                            {
-                                // The document is available before approval, independently
-                                // of the abbreviated tool details and eventual tool result.
-                                plans.push(plan);
-                            }
-                            tool_calls.push(ToolCall {
-                                id,
-                                label: summarize_tool_label(block.get("input"), &name),
-                                detail: summarize_tool_input(block.get("input")),
-                                name,
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            for plan in plans {
-                if !text.contains(plan) {
-                    if !text.is_empty() {
-                        text.push_str("\n\n");
-                    }
-                    text.push_str(plan);
-                }
-            }
-            if text.is_empty() && thinking.is_none() && tool_calls.is_empty() {
-                return Vec::new();
-            }
-            let done = message.get("stop_reason").is_some();
-            vec![ChatMsg {
-                key,
-                role: Role::Assistant,
-                text,
-                thinking,
-                tool_calls,
-                tool_result: None,
-                ts,
-                done,
-                interrupted: false,
-            }]
-        }
+        "user" => parse_user_line(v, message, ts),
+        "assistant" => parse_assistant_line(v, message, ts),
         _ => Vec::new(), // system / mode / api-request / attachment / ... — ignored
     }
+}
+
+/// A displayable user turn: no thinking, no tools, never streaming.
+fn user_msg(key: &str, text: String, ts: Option<String>) -> ChatMsg {
+    ChatMsg {
+        key: key.to_string(),
+        role: Role::User,
+        text,
+        thinking: None,
+        tool_calls: Vec::new(),
+        tool_result: None,
+        ts,
+        done: true,
+        interrupted: false,
+    }
+}
+
+fn parse_user_line(v: &Value, message: &Value, ts: Option<String>) -> Vec<ChatMsg> {
+    if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
+        return Vec::new();
+    }
+    if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+        return Vec::new();
+    }
+    // Array content = tool results, or a prompt that carried images.
+    if let Some(blocks) = message.get("content").and_then(Value::as_array) {
+        return parse_user_blocks(v, blocks, ts);
+    }
+    // String content = a real prompt.
+    let Some(raw) = message.get("content").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let text = raw.trim();
+    if text.is_empty()
+        || is_interrupt_marker(text)
+        || SKIP_USER_PREFIXES.iter().any(|p| text.starts_with(p))
+    {
+        return Vec::new();
+    }
+    let Some(key) = v.get("uuid").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    vec![user_msg(key, text.to_string(), ts)]
+}
+
+/// Tool results, or a prompt that pasted screenshots into Claude Code.
+fn parse_user_blocks(v: &Value, blocks: &[Value], ts: Option<String>) -> Vec<ChatMsg> {
+    let mut results = Vec::new();
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+            continue;
+        }
+        let call_id = block
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if call_id.is_empty() {
+            continue;
+        }
+        let is_error = block
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let text = extract_result_text(block.get("content"));
+        results.push(ChatMsg {
+            key: format!("tr-{call_id}"),
+            role: Role::User,
+            text: String::new(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            tool_result: Some(ToolResult {
+                call_id,
+                is_error,
+                text: truncate_chars(&text, TOOL_RESULT_MAX),
+            }),
+            ts: ts.clone(),
+            done: true,
+            interrupted: false,
+        });
+    }
+    if !results.is_empty() {
+        return results;
+    }
+    // A prompt with pasted screenshots is stored as an array of text + image
+    // blocks (e.g. "[Image #1] Take a look"). It must surface as a user turn:
+    // unlike a plain-text prompt, the frontend's optimistic bubble is the only
+    // other copy, and it is not recreated from anywhere else. Claude Code also
+    // writes a model-facing echo of the same turn ("[Image: source: …]") that
+    // has no image block — that one is skipped.
+    let has_image = blocks
+        .iter()
+        .any(|b| b.get("type").and_then(Value::as_str) == Some("image"));
+    if !has_image {
+        return Vec::new();
+    }
+    let text = blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|b| b.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut text = text.trim().to_string();
+    // An image-only prompt may carry no text block at all; keep a marker so
+    // the turn still reaches the mirror.
+    if text.is_empty() {
+        text = "[Image #1]".to_string();
+    }
+    let Some(key) = v.get("uuid").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    if is_interrupt_marker(&text) || SKIP_USER_PREFIXES.iter().any(|p| text.starts_with(p)) {
+        return Vec::new();
+    }
+    vec![user_msg(key, text, ts)]
+}
+
+/// One assistant `tool_use` block, plus the plan document when it is an
+/// `ExitPlanMode` call.
+fn parse_tool_use(block: &Value) -> (ToolCall, Option<&str>) {
+    let name = block
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("tool")
+        .to_string();
+    let id = block
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let plan = if name == "ExitPlanMode" {
+        block
+            .pointer("/input/plan")
+            .and_then(Value::as_str)
+            .filter(|plan| !plan.trim().is_empty())
+    } else {
+        None
+    };
+    let call = ToolCall {
+        id,
+        label: summarize_tool_label(block.get("input"), &name),
+        detail: summarize_tool_input(block.get("input")),
+        name,
+    };
+    (call, plan)
+}
+
+fn parse_assistant_line(v: &Value, message: &Value, ts: Option<String>) -> Vec<ChatMsg> {
+    if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+        return Vec::new();
+    }
+    // Claude Code synthesizes this placeholder locally when a request
+    // is aborted or queued without an API response; its own UI hides
+    // it, so the mirror should not show "无需回复。".
+    if is_synthetic_no_response(message) {
+        return Vec::new();
+    }
+    let Some(key) = message
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| v.get("uuid").and_then(Value::as_str).map(str::to_string))
+    else {
+        return Vec::new();
+    };
+    let mut text = String::new();
+    let mut plans = Vec::new();
+    let mut thinking = None;
+    let mut tool_calls = Vec::new();
+    if let Some(blocks) = message.get("content").and_then(Value::as_array) {
+        for block in blocks {
+            match block.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    if let Some(t) = block.get("text").and_then(Value::as_str) {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(t);
+                    }
+                }
+                Some("thinking") => {
+                    if let Some(t) = block.get("thinking").and_then(Value::as_str) {
+                        thinking = Some(t.to_string());
+                    }
+                }
+                Some("tool_use") => {
+                    let (call, plan) = parse_tool_use(block);
+                    // The plan document is available before approval,
+                    // independently of the abbreviated tool details and the
+                    // eventual tool result.
+                    plans.extend(plan);
+                    tool_calls.push(call);
+                }
+                _ => {}
+            }
+        }
+    }
+    for plan in plans {
+        if !text.contains(plan) {
+            if !text.is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str(plan);
+        }
+    }
+    if text.is_empty() && thinking.is_none() && tool_calls.is_empty() {
+        return Vec::new();
+    }
+    let done = message.get("stop_reason").is_some();
+    vec![ChatMsg {
+        key,
+        role: Role::Assistant,
+        text,
+        thinking,
+        tool_calls,
+        tool_result: None,
+        ts,
+        done,
+        interrupted: false,
+    }]
 }
 
 // ---------- Conversations ----------

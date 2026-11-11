@@ -40,6 +40,66 @@ pub struct SessionUpdate {
     pub upserts: Vec<ChatMsg>,
 }
 
+/// Read state for one transcript file. Every field is invalidated together
+/// when the file is replaced, truncated or removed, so a fresh file is never
+/// read through a stale offset.
+struct Tail {
+    last_pos: u64,
+    /// Bytes read that do not yet form a complete JSONL record.
+    partial: Vec<u8>,
+    /// Bounded tail of what was already read, so an in-place rewrite is
+    /// detected even if the file grows back past our offset between polls.
+    checkpoint: Vec<u8>,
+    last_modified: Option<std::time::SystemTime>,
+    /// The first batch read from an existing file is history, not live
+    /// activity; imported conversations use this to skip translation.
+    historical: bool,
+    /// key → last emitted JSON; dedupes streaming snapshot re-emissions.
+    emitted: HashMap<String, String>,
+    /// Whether the last turn-changing line was a user prompt. A transcript
+    /// that ends on one has no assistant reply, usually because the request
+    /// was aborted before the CLI could write an interrupt marker.
+    last_turn_was_user: bool,
+    /// The last user prompt, kept so an interrupt that arrives before any
+    /// assistant reply can mark that bubble as interrupted.
+    last_user: Option<ChatMsg>,
+    marked_interrupted: bool,
+}
+
+impl Tail {
+    fn new() -> Self {
+        Self {
+            last_pos: 0,
+            partial: Vec::new(),
+            checkpoint: Vec::new(),
+            last_modified: None,
+            historical: true,
+            emitted: HashMap::new(),
+            last_turn_was_user: false,
+            last_user: None,
+            marked_interrupted: false,
+        }
+    }
+
+    /// Forgets the file: it was replaced, truncated, or is gone.
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    /// Keeps the last 64 bytes read, for the rewrite check.
+    fn remember_checkpoint(&mut self, read: &[u8]) {
+        if read.len() >= 64 {
+            self.checkpoint.clear();
+            self.checkpoint.extend_from_slice(&read[read.len() - 64..]);
+        } else {
+            self.checkpoint.extend_from_slice(read);
+            if self.checkpoint.len() > 64 {
+                self.checkpoint.drain(..self.checkpoint.len() - 64);
+            }
+        }
+    }
+}
+
 /// Tails the session JSONL for one conversation and emits `session-update`
 /// events. Polling (not FSEvents) on purpose: files are local, append-only,
 /// may not exist until the first message, and a 300 ms stat loop over a
@@ -48,6 +108,7 @@ pub struct SessionUpdate {
 /// The caller resolves `path` (see `claude::resolve_jsonl`): imported sessions
 /// may live under a project directory whose name does not match the
 /// canonicalized workspace folder.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_follower(
     app: tauri::AppHandle,
     conv_id: String,
@@ -61,29 +122,11 @@ pub fn spawn_follower(
     let mut file_identity = plan_approval.lock().unwrap().boundary().identity;
     tracing::info!(?path, conv_id = %conv_id, "follower started");
     tokio::spawn(async move {
-        let mut last_pos: u64 = 0;
-        let mut partial: Vec<u8> = Vec::new();
-        // A bounded tail detects in-place truncation/rewrite even if the file
-        // grows back past our offset between polls.
-        let mut checkpoint: Vec<u8> = Vec::new();
-        let mut last_modified = None;
-        // The first batch read from an existing file is history, not live
-        // activity; imported conversations use this to skip translation.
-        let mut historical = true;
-        // key → last emitted JSON; dedupes streaming snapshot re-emissions.
-        let mut emitted: HashMap<String, String> = HashMap::new();
+        let mut tail = Tail::new();
         // Busy events are suppressed while replaying history; only the final
         // state of the first batch is emitted, so resuming an idle session
         // doesn't flash a running spinner through its old turns.
         let mut live = false;
-        // Whether the last turn-changing line was a user prompt. A transcript
-        // that ends on one has no assistant reply, usually because the request
-        // was aborted before the CLI could write an interrupt marker.
-        let mut last_turn_was_user = false;
-        // The last user prompt, kept so an interrupt that arrives before any
-        // assistant reply can mark that bubble as interrupted.
-        let mut last_user: Option<ChatMsg> = None;
-        let mut marked_interrupted = false;
 
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -92,30 +135,26 @@ pub fn spawn_follower(
                 if file_identity.is_some() {
                     plan_approval.lock().unwrap().reset_transcript(0, None);
                     file_identity = None;
-                    last_pos = 0;
-                    partial.clear();
-                    checkpoint.clear();
-                    last_modified = None;
-                    emitted.clear();
-                    historical = true;
-                    last_turn_was_user = false;
-                    last_user = None;
+                    tail.reset();
                     assistant_since_prompt.store(false, Ordering::Relaxed);
-                    marked_interrupted = false;
                 }
                 continue; // normal until the first message
             };
             let len = meta.len();
             let identity = FileIdentity::of(&meta);
             let modified = meta.modified().ok();
-            let replaced = len < last_pos || file_identity.is_some_and(|old| old != identity);
-            if !replaced && len <= last_pos && partial.is_empty() && modified == last_modified {
+            let replaced = len < tail.last_pos || file_identity.is_some_and(|old| old != identity);
+            if !replaced
+                && len <= tail.last_pos
+                && tail.partial.is_empty()
+                && modified == tail.last_modified
+            {
                 continue;
             }
             let read = if replaced {
                 None
             } else {
-                match read_range(&path, last_pos, identity, &checkpoint).await {
+                match read_range(&path, tail.last_pos, identity, &tail.checkpoint).await {
                     Ok(bytes) => bytes,
                     Err(e) => {
                         tracing::warn!(?path, error = %e, "session read failed");
@@ -131,34 +170,21 @@ pub fn spawn_follower(
                     .reset_transcript(len, Some(identity));
                 tracing::info!(?path, "session file changed, resnapshotting");
                 file_identity = Some(identity);
-                last_pos = 0;
-                partial.clear();
-                checkpoint.clear();
-                last_modified = None;
-                emitted.clear();
-                historical = true;
-                last_turn_was_user = false;
-                last_user = None;
+                tail.reset();
                 assistant_since_prompt.store(false, Ordering::Relaxed);
-                marked_interrupted = false;
                 continue;
             };
             file_identity = Some(identity);
-            last_modified = modified;
-            let partial_start = last_pos - partial.len() as u64;
-            last_pos += read.len() as u64;
+            tail.last_modified = modified;
+            let partial_start = tail.last_pos - tail.partial.len() as u64;
+            tail.last_pos += read.len() as u64;
             if read.is_empty() {
                 continue;
             }
-            if read.len() >= 64 {
-                checkpoint.clear();
-                checkpoint.extend_from_slice(&read[read.len() - 64..]);
-            } else {
-                checkpoint.extend_from_slice(&read);
-                if checkpoint.len() > 64 {
-                    checkpoint.drain(..checkpoint.len() - 64);
-                }
-            }
+            tail.remember_checkpoint(&read);
+            // Moved out while parsing, because the loop body needs the rest of
+            // `tail` mutably; put back once the complete records are consumed.
+            let mut partial = std::mem::take(&mut tail.partial);
             partial.extend_from_slice(&read);
 
             let mut upserts: Vec<ChatMsg> = Vec::new();
@@ -184,32 +210,31 @@ pub fn spawn_follower(
                 let is_user_prompt = state == Some(true)
                     && v.get("type").and_then(serde_json::Value::as_str) == Some("user");
                 if is_user_prompt {
-                    last_user = parsed.iter().find(|m| m.role == Role::User).cloned();
-                    marked_interrupted = false;
+                    tail.last_user = parsed.iter().find(|m| m.role == Role::User).cloned();
+                    tail.marked_interrupted = false;
                 }
                 record_assistant_progress(&v, state, &assistant_since_prompt);
 
                 // An interrupt before any assistant line leaves no reply: mark
                 // the prompt so the chat can say "已中断" instead of showing a
                 // silently dangling user bubble.
-                if !marked_interrupted
+                if !tail.marked_interrupted
                     && !assistant_since_prompt.load(Ordering::Relaxed)
                     && (has_interrupt_marker(&v)
                         || v.get("message").is_some_and(is_synthetic_no_response))
+                    && let Some(mut msg) = tail.last_user.clone()
                 {
-                    if let Some(mut msg) = last_user.clone() {
-                        msg.interrupted = true;
-                        let fingerprint = serde_json::to_string(&msg).unwrap_or_default();
-                        if emitted.get(&msg.key) != Some(&fingerprint) {
-                            emitted.insert(msg.key.clone(), fingerprint);
-                            upserts.push(msg);
-                        }
-                        marked_interrupted = true;
+                    msg.interrupted = true;
+                    let fingerprint = serde_json::to_string(&msg).unwrap_or_default();
+                    if tail.emitted.get(&msg.key) != Some(&fingerprint) {
+                        tail.emitted.insert(msg.key.clone(), fingerprint);
+                        upserts.push(msg);
                     }
+                    tail.marked_interrupted = true;
                 }
 
                 if let Some(running) = state {
-                    last_turn_was_user = is_user_prompt;
+                    tail.last_turn_was_user = is_user_prompt;
                     let changed = {
                         let mut map = busy.lock().unwrap();
                         let prev = map.insert(conv_id.clone(), running);
@@ -227,16 +252,17 @@ pub fn spawn_follower(
                 }
                 for msg in parsed {
                     let fingerprint = serde_json::to_string(&msg).unwrap_or_default();
-                    match emitted.get(&msg.key) {
+                    match tail.emitted.get(&msg.key) {
                         Some(prev) if *prev == fingerprint => {}
                         _ => {
-                            emitted.insert(msg.key.clone(), fingerprint);
+                            tail.emitted.insert(msg.key.clone(), fingerprint);
                             upserts.push(msg);
                         }
                     }
                 }
             }
             partial.drain(..consumed);
+            tail.partial = partial;
 
             if !live {
                 // A replayed turn that ends on a user prompt with no assistant
@@ -247,7 +273,7 @@ pub fn spawn_follower(
                     let had_state = map.contains_key(&conv_id);
                     let running = replay_busy(
                         map.get(&conv_id).copied().unwrap_or(false),
-                        last_turn_was_user,
+                        tail.last_turn_was_user,
                     );
                     if had_state {
                         map.insert(conv_id.clone(), running);
@@ -278,13 +304,13 @@ pub fn spawn_follower(
                     conversation_id: conv_id.clone(),
                     session_id: session_id.clone(),
                     imported,
-                    historical,
+                    historical: tail.historical,
                     upserts,
                 };
                 if let Err(e) = app.emit("session-update", &update) {
                     tracing::warn!(error = %e, "emit session-update failed");
                 }
-                historical = false;
+                tail.historical = false;
             }
         }
     })
