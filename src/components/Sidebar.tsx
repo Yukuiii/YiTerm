@@ -31,6 +31,7 @@ interface SidebarProps {
   mode: ViewMode;
   userName: string;
   gitStatus: GitStatusState;
+  workspaceFolder: string | null;
   onModeChange: (mode: ViewMode) => void;
   onNew: () => void;
   onOpenSettings: () => void;
@@ -48,6 +49,7 @@ export default function Sidebar({
   mode,
   userName,
   gitStatus,
+  workspaceFolder,
   onModeChange,
   onNew,
   onOpenSettings,
@@ -164,6 +166,16 @@ export default function Sidebar({
         </div>
       </div>
 
+      <button
+        className="new-session-btn"
+        disabled={!workspaceFolder}
+        title={workspaceFolder ? `在 ${workspaceFolder} 中新建会话` : '请先选择工作区'}
+        onClick={() => { closeSearch(); selectView('sessions'); onNew(); }}
+      >
+        <PlusIcon size={16} />
+        <span>新会话</span>
+      </button>
+
       <div className="sidebar-view-switch" role="tablist" aria-label="侧边栏视图" onKeyDown={onViewKeyDown}>
         {(['sessions', 'git'] as const).map((tab) => (
           <button
@@ -190,11 +202,6 @@ export default function Sidebar({
         aria-labelledby={`${viewId}-sessions-tab`}
         hidden={view !== 'sessions'}
       >
-        <button className="new-session-btn" onClick={onNew}>
-          <PlusIcon size={16} />
-          <span>新会话</span>
-        </button>
-
         <nav className="side-nav">
           <button
             className={`side-nav-btn ${searchOpen ? 'active' : ''}`}

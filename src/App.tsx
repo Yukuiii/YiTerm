@@ -217,16 +217,6 @@ export default function App() {
     }
   };
 
-  const handleNew = async () => {
-    const folder = await pickFolder();
-    if (!folder) return;
-    try {
-      await createConv(folder);
-    } catch (e) {
-      console.error('create conversation failed:', e);
-    }
-  };
-
   const handleCreateInFolder = (folder: string) => {
     void createConv(folder).catch((e) => console.error('create conversation failed:', e));
   };
@@ -284,8 +274,9 @@ export default function App() {
           mode={viewMode}
           userName={userName}
           gitStatus={projectGit}
+          workspaceFolder={statusFolder}
           onModeChange={setViewMode}
-          onNew={() => void handleNew()}
+          onNew={() => { if (statusFolder) handleCreateInFolder(statusFolder); }}
           onOpenSettings={() => setSettingsOpen(true)}
           onCreateInFolder={handleCreateInFolder}
           onSelect={setActive}
