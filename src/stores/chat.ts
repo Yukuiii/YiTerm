@@ -1,5 +1,14 @@
 import { create } from 'zustand';
-import { chatLoad, chatSave, debugLog, hasCJK, translate, type ChatMsg, type ToolCall } from '../ipc';
+import {
+  chatLoad,
+  chatSave,
+  debugLog,
+  hasCJK,
+  translate,
+  type ChatMsg,
+  type ToolCall,
+  type ToolResult,
+} from '../ipc';
 import { useSettingsStore } from './settings';
 
 export interface ToolCallItem extends ToolCall {
@@ -191,6 +200,29 @@ function completeBoundary(text: string): number {
   return 0;
 }
 
+/**
+ * A user bubble created by the composer, before the transcript has it.
+ * `working` is true while the outbound zh → en translation is still running.
+ */
+function localUserMsg(text: string, working: boolean, images?: string[], files?: string[]): Msg {
+  return {
+    key: `local-${crypto.randomUUID()}`,
+    role: 'user',
+    original: text,
+    translation: null,
+    working,
+    error: null,
+    // An image-bearing turn never reconciles with the transcript (its JSONL
+    // content is an array), so it needs its own timestamp now.
+    ts: images?.length ? new Date().toISOString() : null,
+    thinking: null,
+    toolCalls: [],
+    images: images?.length ? images : undefined,
+    hadImages: images?.length ? true : undefined,
+    files: files?.length ? files : undefined,
+  };
+}
+
 function updateMsg(byConv: Record<string, Msg[]>, convId: string, key: string, f: (m: Msg) => Msg): Record<string, Msg[]> {
   const list = byConv[convId];
   if (!list) return byConv;
@@ -256,44 +288,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   addOptimistic: (convId, text, images, files) => {
-    const key = `local-${crypto.randomUUID()}`;
-    const msg: Msg = {
-      key, role: 'user', original: text, translation: null,
-      working: true, error: null,
-      // An image-bearing turn never reconciles with the transcript (its JSONL
-      // content is an array), so it needs its own timestamp now.
-      ts: images?.length ? new Date().toISOString() : null,
-      thinking: null, toolCalls: [],
-      images: images?.length ? images : undefined,
-      hadImages: images?.length ? true : undefined,
-      files: files?.length ? files : undefined,
-    };
+    const msg = localUserMsg(text, true, images, files);
     set((s) => ({ byConv: { ...s.byConv, [convId]: [...(s.byConv[convId] ?? []), msg] } }));
     if (images?.length || files?.length) saveNow(convId);
     void debugLog(
-      `addOptimistic conv=${convId} key=${key} len=${text.length} ` +
+      `addOptimistic conv=${convId} key=${msg.key} len=${text.length} ` +
         `img=${images?.length ?? 0} file=${files?.length ?? 0}`,
     );
-    return key;
+    return msg.key;
   },
 
   markSent: (convId, key, sentText) =>
     set((s) => ({ byConv: updateMsg(s.byConv, convId, key, (m) => ({ ...m, sentText })) })),
 
   addPlain: (convId, text, images, files) => {
-    const key = `local-${crypto.randomUUID()}`;
-    const msg: Msg = {
-      key, role: 'user', original: text, translation: null,
-      working: false, error: null,
-      ts: images?.length ? new Date().toISOString() : null,
-      thinking: null, toolCalls: [],
-      images: images?.length ? images : undefined,
-      hadImages: images?.length ? true : undefined,
-      files: files?.length ? files : undefined,
-    };
+    const msg = localUserMsg(text, false, images, files);
     set((s) => ({ byConv: { ...s.byConv, [convId]: [...(s.byConv[convId] ?? []), msg] } }));
     if (images?.length || files?.length) saveNow(convId);
-    return key;
+    return msg.key;
   },
 
   upsertFromSession: (convId, msgs, translate = true) => {
@@ -302,162 +314,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         msgs.map((m) => `${m.role}:${m.key.slice(0, 12)}:len${m.text.length}:done${m.done ? 1 : 0}`).join(','),
     );
     for (const m of msgs) {
-      const list = get().byConv[convId] ?? [];
-
-      // Tool output: attach to the assistant message holding that call id.
-      if (m.toolResult) {
-        const tr = m.toolResult;
-        set((s) => {
-          const cur = s.byConv[convId] ?? [];
-          let hit = false;
-          const next = cur.map((msg) => {
-            if (msg.toolCalls.length === 0) return msg;
-            const idx = msg.toolCalls.findIndex((t) => t.id === tr.callId);
-            if (idx === -1) return msg;
-            hit = true;
-            const calls = [...msg.toolCalls];
-            calls[idx] = { ...calls[idx], result: tr.text, isError: tr.isError };
-            return { ...msg, toolCalls: calls };
-          });
-          return hit ? { byConv: { ...s.byConv, [convId]: next } } : {};
-        });
-        continue;
-      }
-
-      if (m.role === 'user') {
-        // Reconcile with the optimistic bubble (already-known session key,
-        // or matching en translation / original text). Keep `key` stable —
-        // an in-flight outbound translation still addresses this bubble by it.
-        const trimmed = m.text.trim();
-        // When Claude Code cannot attach a pasted image it falls back to
-        // inserting the literal path as text, which arrives here as a
-        // string-content turn. Strip our own image paths (and any `[Image #N]`
-        // marker) so it reconciles instead of becoming a second bubble whose
-        // body is a filesystem path.
-        const textMatches = (x: Msg) => {
-          if (x.role !== 'user') return false;
-          if (x.sentText === trimmed || x.translation === trimmed || x.original.trim() === trimmed) {
-            return true;
-          }
-          if (!x.images?.length) return false;
-          let rest = trimmed;
-          for (const p of x.images) rest = rest.split(p).join(' ');
-          rest = rest.replace(/\[(?:Image|Pasted text) #\d+(?: \+\d+ lines)?\]/g, '').trim();
-          return rest !== trimmed && (x.sentText === rest || x.original.trim() === rest);
-        };
-        const bySession = list.find((x) => x.role === 'user' && x.sessionKey === m.key);
-        // An interrupt update must land on the exact transcript message. If it
-        // has not been reconciled yet, only consider bubbles with no session
-        // key so an older duplicate carrying the same text is not marked.
-        const match =
-          bySession ??
-          (m.interrupted
-            ? list.find((x) => x.role === 'user' && !x.sessionKey && textMatches(x))
-            : list.find(textMatches));
-        if (match) {
-          set((s) => ({ byConv: updateMsg(s.byConv, convId, match.key, (prev) => ({
-            ...prev,
-            sessionKey: m.key,
-            ts: prev.ts ?? m.ts,
-            ...(m.interrupted ? { interrupted: true } : {}),
-          })) }));
-          continue;
-        }
-        if (list.some((x) => x.key === m.key)) {
-          if (m.interrupted) {
-            set((s) => ({
-              byConv: updateMsg(s.byConv, convId, m.key, (prev) => ({
-                ...prev, interrupted: true,
-              })),
-            }));
-          }
-          continue; // already known
-        }
-        // Rebuilding a turn we have no optimistic bubble for (e.g. an image
-        // turn restored from the transcript, or one typed in the terminal).
-        // Strip Claude Code's `[Image #N]` marker: the thumbnail itself is not
-        // persisted, so record that the turn had one and keep the caption.
-        const hadImages = /\[Image #\d+\]/.test(m.text);
-        const display = m.text.replace(/\[Image #\d+\]/g, '').replace(/\s+/g, ' ').trim();
-        set((s) => ({
-          byConv: {
-            ...s.byConv,
-            [convId]: [...(s.byConv[convId] ?? []), {
-              key: m.key, role: 'user', original: display, translation: null,
-              working: false, error: null, ts: m.ts, thinking: null, toolCalls: [],
-              fromTerminal: true, sessionKey: m.key,
-              hadImages: hadImages || undefined,
-              interrupted: m.interrupted || undefined,
-            } satisfies Msg],
-          },
-        }));
-        continue;
-      }
-
-      // assistant: upsert by key.
-      // A later assistant line means the turn was not actually interrupted.
-      const pendingUser = list.findLast((x) => x.role === 'user');
-      if (
-        pendingUser?.interrupted &&
-        pendingUser.ts &&
-        m.ts &&
-        Date.parse(m.ts) > Date.parse(pendingUser.ts)
-      ) {
-        set((s) => ({
-          byConv: updateMsg(s.byConv, convId, pendingUser.key, (prev) => ({
-            ...prev, interrupted: false,
-          })),
-        }));
-      }
-      // A message id can arrive as several block-scoped lines (thinking / text /
-      // tool_use) — never let an empty-text line wipe text we already have.
-      const existing = list.find((x) => x.key === m.key);
-      const nextText = m.text !== '' ? m.text : (existing?.original ?? '');
-      const textChanged = existing ? nextText !== existing.original : m.text !== '';
-      void debugLog(
-        `asstIter key=${m.key.slice(0, 14)} existed=${existing ? 1 : 0} ` +
-          `prevLen=${existing ? existing.original.length : -1} newLen=${m.text.length} ` +
-          `changed=${textChanged ? 1 : 0} think=${m.thinking ? 1 : 0} tools=${m.toolCalls.length}`,
-      );
-
-      if (!existing) {
-        const msg: Msg = {
-          key: m.key, role: 'assistant', original: m.text, translation: null,
-          working: false, error: null, ts: m.ts, thinking: m.thinking,
-          toolCalls: mergeToolCalls([], m.toolCalls),
-          translatedFrom: undefined, done: m.done,
-        };
-        set((s) => ({ byConv: { ...s.byConv, [convId]: [...(s.byConv[convId] ?? []), msg] } }));
-      } else {
-        set((s) => ({ byConv: updateMsg(s.byConv, convId, m.key, (prev) => ({
-          ...prev,
-          original: nextText,
-          thinking: m.thinking ?? prev.thinking,
-          toolCalls: mergeToolCalls(prev.toolCalls, m.toolCalls),
-          ts: m.ts ?? prev.ts,
-          // Block-scoped lines arrive separately; once a turn is done it
-          // must stay done even if a late line reports false.
-          done: prev.done || m.done,
-        })) }));
-      }
-
-      // Schedule translation: immediate when done / already-stale, debounced
-      // while streaming so mid-stream snapshots don't burn requests. Replayed
-      // history from Claude's records is displayed untranslated.
-      const inflightKey = `${convId}:${m.key}`;
-      const current = get().byConv[convId]?.find((x) => x.key === m.key);
-      const fullyTranslated =
-        !!current?.translation && current.translatedFrom === current.original;
-      // Translate on new text, and once more when the turn ends so the
-      // trailing (possibly incomplete) fragment gets covered too.
-      if (translate && (textChanged || (m.done && !fullyTranslated)) && !inflight.has(inflightKey)) {
-        if (m.done) {
-          cancelSchedule(convId, m.key);
-          void get().translateNow(convId, m.key);
-        } else {
-          schedule(convId, m.key, () => void get().translateNow(convId, m.key));
-        }
-      }
+      if (m.toolResult) attachToolResult(convId, m.toolResult);
+      else if (m.role === 'user') reconcileUserTurn(convId, m);
+      else upsertAssistantTurn(convId, m, translate);
     }
     // Ground truth of the live store after the batch (persistence is
     // timer-based and can lag under webview throttling).
@@ -627,6 +486,183 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     return final;
   },
 }));
+
+// ---- applying transcript lines (the three cases of `upsertFromSession`) ----
+
+/** Tool output: attach it to the assistant message holding that call id. */
+function attachToolResult(convId: string, result: ToolResult) {
+  useChatStore.setState((s) => {
+    const cur = s.byConv[convId] ?? [];
+    let hit = false;
+    const next = cur.map((msg) => {
+      if (msg.toolCalls.length === 0) return msg;
+      const idx = msg.toolCalls.findIndex((t) => t.id === result.callId);
+      if (idx === -1) return msg;
+      hit = true;
+      const calls = [...msg.toolCalls];
+      calls[idx] = { ...calls[idx], result: result.text, isError: result.isError };
+      return { ...msg, toolCalls: calls };
+    });
+    return hit ? { byConv: { ...s.byConv, [convId]: next } } : {};
+  });
+}
+
+/**
+ * Whether a transcript prompt (already trimmed) is the turn this bubble sent:
+ * it equals the English written to the terminal, the translation, or the
+ * original text.
+ *
+ * When Claude Code cannot attach a pasted image it falls back to inserting the
+ * literal path as text, which arrives as a string-content turn. The bubble's
+ * own image paths (and any `[Image #N]` marker) are stripped so it reconciles
+ * instead of becoming a second bubble whose body is a filesystem path.
+ */
+function isSameUserTurn(bubble: Msg, text: string): boolean {
+  if (bubble.role !== 'user') return false;
+  if (bubble.sentText === text || bubble.translation === text || bubble.original.trim() === text) {
+    return true;
+  }
+  if (!bubble.images?.length) return false;
+  let rest = text;
+  for (const path of bubble.images) rest = rest.split(path).join(' ');
+  rest = rest.replace(/\[(?:Image|Pasted text) #\d+(?: \+\d+ lines)?\]/g, '').trim();
+  return rest !== text && (bubble.sentText === rest || bubble.original.trim() === rest);
+}
+
+/**
+ * A transcript user line: reconcile it with the optimistic bubble (by a known
+ * session key, or by matching text), or add a bubble for a turn that did not
+ * come from the composer. A reconciled bubble keeps its `key` — an in-flight
+ * outbound translation still addresses the bubble by it.
+ */
+function reconcileUserTurn(convId: string, m: ChatMsg) {
+  const list = useChatStore.getState().byConv[convId] ?? [];
+  const trimmed = m.text.trim();
+  const bySession = list.find((x) => x.role === 'user' && x.sessionKey === m.key);
+  // An interrupt update must land on the exact transcript message. If it
+  // has not been reconciled yet, only consider bubbles with no session
+  // key so an older duplicate carrying the same text is not marked.
+  const match =
+    bySession ??
+    (m.interrupted
+      ? list.find((x) => !x.sessionKey && isSameUserTurn(x, trimmed))
+      : list.find((x) => isSameUserTurn(x, trimmed)));
+  if (match) {
+    useChatStore.setState((s) => ({ byConv: updateMsg(s.byConv, convId, match.key, (prev) => ({
+      ...prev,
+      sessionKey: m.key,
+      ts: prev.ts ?? m.ts,
+      ...(m.interrupted ? { interrupted: true } : {}),
+    })) }));
+    return;
+  }
+  if (list.some((x) => x.key === m.key)) {
+    // Already known; only an interrupt can still change it.
+    if (m.interrupted) {
+      useChatStore.setState((s) => ({
+        byConv: updateMsg(s.byConv, convId, m.key, (prev) => ({
+          ...prev, interrupted: true,
+        })),
+      }));
+    }
+    return;
+  }
+  // Rebuilding a turn we have no optimistic bubble for (e.g. an image
+  // turn restored from the transcript, or one typed in the terminal).
+  // Strip Claude Code's `[Image #N]` marker: the thumbnail itself is not
+  // persisted, so record that the turn had one and keep the caption.
+  const hadImages = /\[Image #\d+\]/.test(m.text);
+  const display = m.text.replace(/\[Image #\d+\]/g, '').replace(/\s+/g, ' ').trim();
+  useChatStore.setState((s) => ({
+    byConv: {
+      ...s.byConv,
+      [convId]: [...(s.byConv[convId] ?? []), {
+        key: m.key, role: 'user', original: display, translation: null,
+        working: false, error: null, ts: m.ts, thinking: null, toolCalls: [],
+        fromTerminal: true, sessionKey: m.key,
+        hadImages: hadImages || undefined,
+        interrupted: m.interrupted || undefined,
+      } satisfies Msg],
+    },
+  }));
+}
+
+/**
+ * A transcript assistant snapshot: upsert by message id (Claude Code writes
+ * several lines per id while streaming), then schedule its en → zh translation.
+ */
+function upsertAssistantTurn(convId: string, m: ChatMsg, shouldTranslate: boolean) {
+  const list = useChatStore.getState().byConv[convId] ?? [];
+  // A later assistant line means the turn was not actually interrupted.
+  const pendingUser = list.findLast((x) => x.role === 'user');
+  if (
+    pendingUser?.interrupted &&
+    pendingUser.ts &&
+    m.ts &&
+    Date.parse(m.ts) > Date.parse(pendingUser.ts)
+  ) {
+    useChatStore.setState((s) => ({
+      byConv: updateMsg(s.byConv, convId, pendingUser.key, (prev) => ({
+        ...prev, interrupted: false,
+      })),
+    }));
+  }
+  // A message id can arrive as several block-scoped lines (thinking / text /
+  // tool_use) — never let an empty-text line wipe text we already have.
+  const existing = list.find((x) => x.key === m.key);
+  const nextText = m.text !== '' ? m.text : (existing?.original ?? '');
+  const textChanged = existing ? nextText !== existing.original : m.text !== '';
+  void debugLog(
+    `asstIter key=${m.key.slice(0, 14)} existed=${existing ? 1 : 0} ` +
+      `prevLen=${existing ? existing.original.length : -1} newLen=${m.text.length} ` +
+      `changed=${textChanged ? 1 : 0} think=${m.thinking ? 1 : 0} tools=${m.toolCalls.length}`,
+  );
+
+  if (!existing) {
+    const msg: Msg = {
+      key: m.key, role: 'assistant', original: m.text, translation: null,
+      working: false, error: null, ts: m.ts, thinking: m.thinking,
+      toolCalls: mergeToolCalls([], m.toolCalls),
+      translatedFrom: undefined, done: m.done,
+    };
+    useChatStore.setState((s) => ({
+      byConv: { ...s.byConv, [convId]: [...(s.byConv[convId] ?? []), msg] },
+    }));
+  } else {
+    useChatStore.setState((s) => ({ byConv: updateMsg(s.byConv, convId, m.key, (prev) => ({
+      ...prev,
+      original: nextText,
+      thinking: m.thinking ?? prev.thinking,
+      toolCalls: mergeToolCalls(prev.toolCalls, m.toolCalls),
+      ts: m.ts ?? prev.ts,
+      // Block-scoped lines arrive separately; once a turn is done it
+      // must stay done even if a late line reports false.
+      done: prev.done || m.done,
+    })) }));
+  }
+
+  // Schedule translation: immediate when done / already-stale, debounced
+  // while streaming so mid-stream snapshots don't burn requests. Replayed
+  // history from Claude's records is displayed untranslated.
+  const translateNow = () => void useChatStore.getState().translateNow(convId, m.key);
+  const current = useChatStore.getState().byConv[convId]?.find((x) => x.key === m.key);
+  const fullyTranslated =
+    !!current?.translation && current.translatedFrom === current.original;
+  // Translate on new text, and once more when the turn ends so the
+  // trailing (possibly incomplete) fragment gets covered too.
+  if (
+    shouldTranslate &&
+    (textChanged || (m.done && !fullyTranslated)) &&
+    !inflight.has(`${convId}:${m.key}`)
+  ) {
+    if (m.done) {
+      cancelSchedule(convId, m.key);
+      translateNow();
+    } else {
+      schedule(convId, m.key, translateNow);
+    }
+  }
+}
 
 /**
  * Writes one conversation immediately instead of waiting for the debounce.
