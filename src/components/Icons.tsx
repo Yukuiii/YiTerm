@@ -168,6 +168,40 @@ export const ArrowDownIcon = ({ size = 16 }: { size?: number }) => (
   </Icon>
 );
 
+export const CopyIcon = ({ size = 16 }: { size?: number }) => (
+  <Icon size={size}>
+    <rect x="8" y="8" width="12" height="13" rx="2" />
+    <path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" />
+  </Icon>
+);
+
+export const GlobeIcon = ({ size = 16 }: { size?: number }) => (
+  <Icon size={size}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M3 12h18M12 3a17 17 0 0 1 0 18 17 17 0 0 1 0-18" />
+  </Icon>
+);
+
+export const TagIcon = ({ size = 16 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="m3 3 8 .5 10 10-7.5 7.5-10-10z" />
+    <circle cx="7.5" cy="7.5" r="1" />
+  </Icon>
+);
+
+export const CloudIcon = ({ size = 16 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M6 19a4 4 0 0 1-.7-7.9 7 7 0 0 1 13.4-1.5A4.8 4.8 0 0 1 18 19z" />
+  </Icon>
+);
+
+export const RefreshIcon = ({ size = 16 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M20 7v5h-5M4 17v-5h5" />
+    <path d="M6 7a7 7 0 0 1 11.5-2L20 8M4 16l2.5 3A7 7 0 0 0 18 17" />
+  </Icon>
+);
+
 export const SpinnerIcon = ({ size = 16 }: { size?: number }) => (
   <svg
     width={size}

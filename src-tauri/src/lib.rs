@@ -25,6 +25,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             git::git_status,
             git::git_diff,
+            git::git_history,
+            git::git_commit_details,
             ipc::terminal_start,
             ipc::terminal_write,
             ipc::terminal_send_prompt,

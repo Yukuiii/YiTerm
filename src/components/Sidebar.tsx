@@ -4,6 +4,7 @@ import type { ViewMode } from '../types';
 import { useTerminalsStore } from '../stores/terminals';
 import { folderName, oneLine } from '../format';
 import GitChangesPanel from './GitChangesPanel';
+import GitGraphPanel from './GitGraphPanel';
 import {
   ChatIcon,
   ChevronIcon,
@@ -326,7 +327,10 @@ export default function Sidebar({
         hidden={view !== 'git'}
       >
         {view === 'git' && (activeFolder ? (
-          <GitChangesPanel key={activeFolder} folder={activeFolder} />
+          <div className="git-workspace" key={activeFolder}>
+            <GitChangesPanel folder={activeFolder} />
+            <GitGraphPanel folder={activeFolder} />
+          </div>
         ) : (
           <div className="sidebar-review-empty">
             <p>选择一个会话以查看项目更改。</p>

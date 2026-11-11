@@ -1132,6 +1132,13 @@ button, input, textarea { font-family: inherit; }
 /* xterm fits after a debounce; clip its previous canvas size while resizing. */
 .pane-term > .term-panel { overflow: hidden; }
 
+.git-workspace {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
 .git-panel {
   flex: 1;
   min-height: 0;
@@ -1225,6 +1232,101 @@ button, input, textarea { font-family: inherit; }
 .git-empty { padding: 15px 10px; color: var(--fg-faint); font-size: 11px; text-align: center; }
 .git-error { flex: none; max-height: 90px; overflow: auto; padding: 9px 13px; color: var(--danger); font-size: 11.5px; line-height: 1.6; overflow-wrap: anywhere; }
 .git-panel-toggle:focus-visible, .git-refresh:focus-visible, .git-file:focus-visible { outline: 1px solid var(--link); outline-offset: -1px; }
+
+/* ---------- Git commit graph ---------- */
+
+.git-graph-panel {
+  --graph-blue: #3987e5;
+  --graph-orange: #d95926;
+  --graph-green: #199e70;
+  border-top: 1px solid var(--border);
+}
+.git-graph-panel .git-panel-head { gap: 4px; }
+.git-graph-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.git-graph-list { padding: 0 4px; }
+.git-graph-row {
+  display: flex;
+  align-items: center;
+  height: 24px;
+  gap: 4px;
+  padding-right: 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--fg-soft);
+  cursor: pointer;
+}
+.git-graph-row:hover, .git-graph-row:focus-visible { background: var(--bg-hover); }
+.git-graph-row.is-selected { background: var(--bg-active); }
+.git-graph-row:focus-visible { outline: 1px solid var(--link); outline-offset: -1px; }
+.git-graph-marks { display: block; flex: none; overflow: visible; }
+.git-graph-marks path { fill: none; stroke: currentColor; stroke-width: 2; }
+.git-graph-color-0 { color: var(--graph-blue); }
+.git-graph-color-1 { color: var(--graph-orange); }
+.git-graph-color-2 { color: var(--graph-green); }
+.git-graph-color-3 { color: var(--fg-muted); }
+.git-graph-halo { fill: var(--bg-sidebar); }
+.git-graph-node { fill: currentColor; }
+.git-graph-node.is-head { fill: var(--bg-sidebar); stroke: currentColor; stroke-width: 2; }
+.git-graph-summary { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; }
+.git-graph-subject { flex: 1; min-width: 32px; overflow: hidden; text-overflow: ellipsis; }
+.git-graph-author { flex: 0 1 36px; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg-muted); font-size: 10px; }
+.git-graph-footer { display: flex; justify-content: center; padding: 9px 6px 10px; color: var(--fg-faint); font-size: 10px; }
+.git-graph-more { width: 100%; padding: 5px 8px; border: 0; border-radius: 4px; background: transparent; color: var(--fg-muted); font-size: 11px; cursor: pointer; }
+.git-graph-more:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
+.git-graph-more:disabled { cursor: default; opacity: 0.6; }
+.git-graph-more:focus-visible { outline: 1px solid var(--link); outline-offset: -1px; }
+.git-graph-error { flex: none; display: flex; align-items: flex-start; gap: 4px; padding: 6px 10px; max-height: 90px; overflow: auto; color: var(--danger); font-size: 10.5px; line-height: 1.5; }
+.git-graph-error > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.git-graph-error > button { flex: none; }
+.git-graph-tooltip {
+  position: fixed;
+  z-index: 130;
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  max-width: calc(100vw - 16px);
+  max-height: min(400px, calc(100vh - 16px));
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--bg-raised);
+  color: var(--fg-soft);
+  box-shadow: 0 8px 24px #0008;
+  font-size: 11.5px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  pointer-events: auto;
+}
+.git-commit-header { display: flex; align-items: center; gap: 5px; padding: 8px 10px 0; min-width: 0; }
+.git-commit-avatar { display: grid; place-items: center; flex: none; width: 19px; height: 19px; border-radius: 3px; background: #354052; color: var(--fg); font-size: 10px; font-weight: 600; }
+.git-commit-author { flex: 0 1 auto; min-width: 0; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--link); font-weight: 500; }
+.git-commit-date { flex: 1; min-width: 0; color: var(--fg-muted); font-size: 10px; }
+.git-commit-message { padding: 6px 10px 8px; white-space: pre-wrap; }
+.git-commit-stats { display: flex; align-items: center; gap: 6px; min-height: 31px; padding: 5px 10px; border-top: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); font-size: 11px; }
+.git-commit-stats .insertions { color: var(--ok); }
+.git-commit-stats .deletions { color: var(--danger); }
+.git-commit-stats [role="status"] { color: var(--fg-muted); }
+.git-commit-stats [role="alert"] { color: var(--danger); }
+.git-commit-refs { display: flex; flex-wrap: wrap; gap: 4px; padding: 7px 10px; }
+.git-commit-ref { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 0 5px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-active); color: var(--fg-soft); font-size: 10px; line-height: 17px; }
+.git-commit-ref svg { flex: none; }
+.git-commit-ref > span { min-width: 0; overflow-wrap: anywhere; }
+.git-commit-ref.is-head, .git-commit-ref.is-branch { background: #1c2c40; border-color: #385579; }
+.git-commit-ref.is-remote { background: #30273e; border-color: #534360; }
+.git-commit-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; padding: 5px 10px 7px; border-top: 1px solid var(--border-soft); font-size: 11px; }
+.git-commit-action { display: inline-flex; align-items: center; gap: 4px; padding: 1px 0; border: 0; border-radius: 2px; background: transparent; color: var(--link); font-size: 11px; line-height: 1.6; cursor: pointer; }
+.git-commit-action:hover { text-decoration: underline; }
+.git-commit-action:focus-visible { outline: 1px solid var(--link); outline-offset: 2px; }
+.git-commit-copy code { font: 11px ui-monospace, monospace; }
+.git-commit-actions .content-link { display: inline-flex; align-items: center; gap: 4px; }
+.git-commit-copy-status { color: var(--fg-muted); font-size: 10px; }
+@media (forced-colors: active) {
+  .git-graph-marks path { stroke: CanvasText; }
+  .git-graph-halo, .git-graph-node.is-head { fill: Canvas; }
+  .git-graph-node { fill: CanvasText; }
+  .git-graph-node.is-head { stroke: CanvasText; }
+}
 
 .git-diff-overlay { z-index: 120; padding: 24px; }
 .git-diff-card {

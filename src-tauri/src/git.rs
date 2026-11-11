@@ -10,9 +10,12 @@ use serde::{Deserialize, Serialize};
 
 const STATUS_LIMIT: usize = 4 * 1024 * 1024;
 const DIFF_LIMIT: usize = 1024 * 1024;
+const HISTORY_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+const COMMIT_DETAILS_LIMIT: usize = 4 * 1024 * 1024;
 const STDERR_LIMIT: usize = 32 * 1024;
 const DEADLINE: Duration = Duration::from_secs(10);
 const STALE_SELECTION: &str = "文件状态已变化，请刷新 Git 状态后重试。";
+const HISTORY_CHANGED: &str = "Git HEAD 或引用持续变化，请刷新提交历史后重试。";
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +57,75 @@ pub struct GitDiff {
     text: String,
     kind: GitDiffKind,
     truncated: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHistory {
+    root: Option<String>,
+    commits: Vec<GitCommit>,
+    refs: Vec<GitRef>,
+    head: GitHead,
+    has_more: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommit {
+    oid: String,
+    parents: Vec<String>,
+    subject: String,
+    author_name: String,
+    author_time: i64,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRef {
+    name: String,
+    short_name: String,
+    kind: GitRefKind,
+    oid: String,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitRefKind {
+    Branch,
+    Remote,
+    Tag,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHead {
+    oid: Option<String>,
+    ref_name: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitDetails {
+    oid: String,
+    message: String,
+    files_changed: u64,
+    insertions: u64,
+    deletions: u64,
+    github_url: Option<String>,
+}
+
+#[tauri::command]
+pub async fn git_commit_details(folder: String, oid: String) -> Result<GitCommitDetails, String> {
+    tauri::async_runtime::spawn_blocking(move || commit_details_in(Path::new(&folder), &oid))
+        .await
+        .map_err(|e| format!("读取 Git 提交详情失败：{e}"))?
+}
+
+#[tauri::command]
+pub async fn git_history(folder: String, limit: usize) -> Result<GitHistory, String> {
+    tauri::async_runtime::spawn_blocking(move || history_in(Path::new(&folder), limit))
+        .await
+        .map_err(|e| format!("读取 Git 提交历史失败：{e}"))?
 }
 
 #[tauri::command]
@@ -213,7 +285,7 @@ fn run_git(
     }
     let truncated = stdout_overflow.load(Ordering::Acquire);
     if truncated && !allow_truncation {
-        return Err("Git 状态输出超过 4 MiB 限制。".to_owned());
+        return Err(format!("Git 输出超过 {stdout_limit} 字节限制。"));
     }
     let read_result = |result: thread::Result<io::Result<Vec<u8>>>| {
         result
@@ -265,6 +337,458 @@ fn repository_root(folder: &Path) -> Result<Option<String>, String> {
         return Err("Git 返回了无效的仓库根目录。".to_owned());
     }
     Ok(Some(path.to_owned()))
+}
+
+fn parse_oid(bytes: &[u8]) -> Result<String, String> {
+    if !matches!(bytes.len(), 40 | 64)
+        || !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return Err("Git 返回了无效的对象 ID。".to_owned());
+    }
+    Ok(String::from_utf8(bytes.to_vec()).expect("hex object ID"))
+}
+
+fn parse_history_log(bytes: &[u8]) -> Result<Vec<GitCommit>, String> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let records = bytes
+        .strip_suffix(b"\0")
+        .ok_or("Git 提交历史记录不完整。")?;
+    let fields: Vec<_> = records.split(|byte| *byte == 0).collect();
+    let mut records = fields.chunks_exact(5);
+    let mut commits = Vec::new();
+    for record in &mut records {
+        let oid = parse_oid(record[0])?;
+        let parents = if record[1].is_empty() {
+            Vec::new()
+        } else {
+            record[1]
+                .split(|byte| *byte == b' ')
+                .map(parse_oid)
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let text = |bytes| {
+            std::str::from_utf8(bytes)
+                .map(str::to_owned)
+                .map_err(|_| "Git 提交历史包含无法通过 UTF-8 传输的字符。".to_owned())
+        };
+        commits.push(GitCommit {
+            oid,
+            parents,
+            author_name: text(record[2])?,
+            author_time: text(record[3])?
+                .parse()
+                .map_err(|_| "Git 返回了无效的提交时间。".to_owned())?,
+            subject: text(record[4])?,
+        });
+    }
+    if !records.remainder().is_empty() {
+        return Err("Git 提交历史记录不完整。".to_owned());
+    }
+    Ok(commits)
+}
+
+fn parse_history_refs(bytes: &[u8]) -> Result<Vec<GitRef>, String> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let records = bytes.strip_suffix(b"\n").ok_or("Git 引用记录不完整。")?;
+    let mut refs = Vec::new();
+    for record in records.split(|byte| *byte == b'\n') {
+        let record = record.strip_suffix(b"\0").ok_or("Git 引用记录不完整。")?;
+        let record = std::str::from_utf8(record)
+            .map_err(|_| "Git 引用包含无法通过 UTF-8 传输的字符。".to_owned())?;
+        let fields: Vec<_> = record.split('\0').collect();
+        let [name, oid, object_type, peeled_oid, peeled_type, symref] = fields.as_slice() else {
+            return Err("Git 返回了无效的引用记录。".to_owned());
+        };
+        if !name.starts_with("refs/") || name.bytes().any(|byte| byte <= b' ' || byte == 127) {
+            return Err("Git 返回了无效的引用名称。".to_owned());
+        }
+        let (kind, short_name) = if let Some(short) = name.strip_prefix("refs/heads/") {
+            (GitRefKind::Branch, short)
+        } else if let Some(short) = name.strip_prefix("refs/remotes/") {
+            (GitRefKind::Remote, short)
+        } else if let Some(short) = name.strip_prefix("refs/tags/") {
+            (GitRefKind::Tag, short)
+        } else {
+            // --all also traverses refs/stash and other namespaces. Snapshot them,
+            // but expose only the three ref kinds supported by the IPC contract.
+            continue;
+        };
+        if short_name.is_empty() {
+            return Err("Git 返回了无效的引用名称。".to_owned());
+        }
+        let oid = parse_oid(oid.as_bytes())?;
+        if !matches!(*object_type, "commit" | "tag" | "tree" | "blob") {
+            return Err("Git 返回了无效的引用对象类型。".to_owned());
+        }
+        let oid = if *object_type == "tag" {
+            // Git's starred for-each-ref atoms peel annotated tags recursively.
+            let peeled_oid = parse_oid(peeled_oid.as_bytes())?;
+            if !matches!(*peeled_type, "commit" | "tree" | "blob") {
+                return Err("Git 返回了无效的标签目标类型。".to_owned());
+            }
+            if *peeled_type != "commit" {
+                continue;
+            }
+            peeled_oid
+        } else if *object_type == "commit" {
+            oid
+        } else {
+            continue;
+        };
+        if kind == GitRefKind::Remote && short_name.ends_with("/HEAD") && !symref.is_empty() {
+            continue;
+        }
+        refs.push(GitRef {
+            name: (*name).to_owned(),
+            short_name: short_name.to_owned(),
+            kind,
+            oid,
+        });
+    }
+    Ok(refs)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct HistorySnapshot {
+    head: GitHead,
+    // Keep raw object IDs, including tag objects and ignored symbolic aliases,
+    // so moving a ref to a different tag for the same commit still invalidates it.
+    refs: Vec<u8>,
+}
+
+fn read_history_snapshot(root: &Path) -> Result<HistorySnapshot, String> {
+    let symbolic = run_git(
+        git_command(root).args(["symbolic-ref", "--quiet", "HEAD"]),
+        HISTORY_OUTPUT_LIMIT,
+        false,
+        DEADLINE,
+    )?;
+    let ref_name = if symbolic.status.success() {
+        let name = symbolic
+            .stdout
+            .strip_suffix(b"\n")
+            .unwrap_or(&symbolic.stdout);
+        let name = std::str::from_utf8(name)
+            .map_err(|_| "Git HEAD 引用包含无法通过 UTF-8 传输的字符。".to_owned())?;
+        if !name.starts_with("refs/") || name.bytes().any(|byte| byte <= b' ' || byte == 127) {
+            return Err("Git 返回了无效的 HEAD 引用。".to_owned());
+        }
+        Some(name.to_owned())
+    } else if symbolic.status.code() == Some(1) {
+        None
+    } else {
+        return Err(command_error(&symbolic));
+    };
+    let resolved = run_git(
+        git_command(root).args(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]),
+        HISTORY_OUTPUT_LIMIT,
+        false,
+        DEADLINE,
+    )?;
+    let oid = if resolved.status.success() {
+        Some(parse_oid(
+            resolved
+                .stdout
+                .strip_suffix(b"\n")
+                .unwrap_or(&resolved.stdout),
+        )?)
+    } else if resolved.status.code() == Some(1) && ref_name.is_some() {
+        // An absent symbolic target is unborn. A present but invalid HEAD is an error.
+        let unpeeled = run_git(
+            git_command(root).args(["rev-parse", "--verify", "--quiet", "HEAD"]),
+            HISTORY_OUTPUT_LIMIT,
+            false,
+            DEADLINE,
+        )?;
+        if unpeeled.status.code() != Some(1) {
+            return Err(command_error(&resolved));
+        }
+        None
+    } else {
+        return Err(command_error(&resolved));
+    };
+    let refs = run_git(
+        git_command(root).args([
+            "for-each-ref",
+            "--sort=refname",
+            "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(symref)%00",
+        ]),
+        HISTORY_OUTPUT_LIMIT,
+        false,
+        DEADLINE,
+    )?;
+    if !refs.status.success() {
+        return Err(command_error(&refs));
+    }
+    Ok(HistorySnapshot {
+        head: GitHead { oid, ref_name },
+        refs: refs.stdout,
+    })
+}
+
+fn read_history_commits(
+    root: &Path,
+    head: &GitHead,
+    limit: usize,
+) -> Result<Vec<GitCommit>, String> {
+    let mut command = git_command(root);
+    command.args([
+        "log",
+        "--all",
+        "--topo-order",
+        &format!("--max-count={}", limit + 1),
+        "-z",
+        "--format=%H%x00%P%x00%an%x00%at%x00%s",
+        "--encoding=UTF-8",
+        "--no-decorate",
+        "--no-color",
+        "--no-show-signature",
+        "--no-notes",
+    ]);
+    // --all alone need not include a detached HEAD's otherwise unreachable commits.
+    if let Some(oid) = &head.oid {
+        command.arg(oid);
+    }
+    command.arg("--");
+    let output = run_git(&mut command, HISTORY_OUTPUT_LIMIT, false, DEADLINE)?;
+    if !output.status.success() {
+        return Err(command_error(&output));
+    }
+    parse_history_log(&output.stdout)
+}
+
+fn history_at(
+    root: String,
+    limit: usize,
+    mut read_snapshot: impl FnMut(&Path) -> Result<HistorySnapshot, String>,
+) -> Result<GitHistory, String> {
+    let limit = limit.clamp(1, 1000);
+    for _ in 0..2 {
+        let before = read_snapshot(Path::new(&root))?;
+        let data = (|| {
+            let refs = parse_history_refs(&before.refs)?;
+            let commits = read_history_commits(Path::new(&root), &before.head, limit)?;
+            Ok::<_, String>((commits, refs))
+        })();
+        let after = read_snapshot(Path::new(&root))?;
+        // Even failed log reads can be caused by concurrent ref changes; retry them.
+        if before != after {
+            continue;
+        }
+        let (mut commits, refs) = data?;
+        let has_more = commits.len() > limit;
+        commits.truncate(limit);
+        return Ok(GitHistory {
+            root: Some(root),
+            commits,
+            refs,
+            head: before.head,
+            has_more,
+        });
+    }
+    Err(HISTORY_CHANGED.to_owned())
+}
+
+fn history_in(folder: &Path, limit: usize) -> Result<GitHistory, String> {
+    let Some(root) = repository_root(folder)? else {
+        return Ok(GitHistory {
+            root: None,
+            commits: Vec::new(),
+            refs: Vec::new(),
+            head: GitHead {
+                oid: None,
+                ref_name: None,
+            },
+            has_more: false,
+        });
+    };
+    history_at(root, limit, read_history_snapshot)
+}
+
+fn parse_commit_message(bytes: &[u8], oid: &str) -> Result<(Vec<String>, String), String> {
+    let record = bytes
+        .strip_suffix(b"\0")
+        .ok_or("Git 提交详情记录不完整。")?;
+    let fields: Vec<_> = record.split(|byte| *byte == 0).collect();
+    let [actual_oid, parents, message] = fields.as_slice() else {
+        return Err("Git 返回了无效的提交详情记录。".to_owned());
+    };
+    if parse_oid(actual_oid)? != oid {
+        return Err("Git 返回的提交 ID 与请求不一致。".to_owned());
+    }
+    let parents = if parents.is_empty() {
+        Vec::new()
+    } else {
+        parents
+            .split(|byte| *byte == b' ')
+            .map(parse_oid)
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let message = std::str::from_utf8(message)
+        .map_err(|_| "Git 提交说明包含无法通过 UTF-8 传输的字符。".to_owned())?;
+    Ok((parents, message.to_owned()))
+}
+
+fn parse_commit_numstat(bytes: &[u8]) -> Result<(u64, u64, u64), String> {
+    if bytes.is_empty() {
+        return Ok((0, 0, 0));
+    }
+    let records = bytes
+        .strip_suffix(b"\0")
+        .ok_or("Git 提交统计记录不完整。")?;
+    let mut records = records.split(|byte| *byte == 0);
+    let mut files_changed = 0_u64;
+    let mut insertions = 0_u64;
+    let mut deletions = 0_u64;
+    let invalid = || "Git 返回了无效的提交统计记录。".to_owned();
+    while let Some(record) = records.next() {
+        // Paths can contain tabs, newlines and non-UTF-8 bytes; only the first
+        // two tabs delimit numbers. With -z, renames have two extra path fields.
+        let mut fields = record.splitn(3, |byte| *byte == b'\t');
+        let added = fields.next().ok_or_else(invalid)?;
+        let removed = fields.next().ok_or_else(invalid)?;
+        let path = fields.next().ok_or_else(invalid)?;
+        if path.is_empty() {
+            for _ in 0..2 {
+                if records.next().ok_or_else(invalid)?.is_empty() {
+                    return Err(invalid());
+                }
+            }
+        }
+        let (added, removed) = if added == b"-" && removed == b"-" {
+            (0, 0)
+        } else {
+            let number = |bytes: &[u8]| -> Result<u64, String> {
+                if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+                    return Err(invalid());
+                }
+                std::str::from_utf8(bytes)
+                    .map_err(|_| invalid())?
+                    .parse()
+                    .map_err(|_| invalid())
+            };
+            (number(added)?, number(removed)?)
+        };
+        files_changed = files_changed.checked_add(1).ok_or_else(invalid)?;
+        insertions = insertions.checked_add(added).ok_or_else(invalid)?;
+        deletions = deletions.checked_add(removed).ok_or_else(invalid)?;
+    }
+    Ok((files_changed, insertions, deletions))
+}
+
+fn github_commit_url(remote: &str, oid: &str) -> Option<String> {
+    let remote = remote.trim();
+    let scp_url;
+    let remote = if let Some(path) = remote.strip_prefix("git@github.com:") {
+        scp_url = format!("ssh://git@github.com/{path}");
+        scp_url.as_str()
+    } else {
+        remote
+    };
+    let url = reqwest::Url::parse(remote).ok()?;
+    if !matches!(url.scheme(), "https" | "http" | "ssh" | "git")
+        || !url.host_str()?.eq_ignore_ascii_case("github.com")
+    {
+        return None;
+    }
+    let mut path = url.path().trim_matches('/').split('/');
+    let owner = path.next()?;
+    let repository = path.next()?;
+    let repository = repository.strip_suffix(".git").unwrap_or(repository);
+    let valid_component = |part: &str| {
+        !part.is_empty()
+            && !matches!(part, "." | "..")
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    };
+    if path.next().is_some() || !valid_component(owner) || !valid_component(repository) {
+        return None;
+    }
+    // Build from the known host and path components, never forwarding userinfo,
+    // query strings, fragments, or a remote URL's transport scheme and port.
+    Some(format!(
+        "https://github.com/{owner}/{repository}/commit/{oid}"
+    ))
+}
+
+fn commit_details_in(folder: &Path, oid: &str) -> Result<GitCommitDetails, String> {
+    let oid = parse_oid(oid.as_bytes())?;
+    let root = repository_root(folder)?.ok_or("当前目录不是 Git 仓库。")?;
+    let root = Path::new(&root);
+    let output = run_git(
+        git_command(root).args([
+            "show",
+            "-s",
+            "-z",
+            "--format=%H%x00%P%x00%B",
+            "--encoding=UTF-8",
+            "--no-notes",
+            "--no-show-signature",
+            "--no-decorate",
+            "--no-color",
+            &oid,
+            "--",
+        ]),
+        COMMIT_DETAILS_LIMIT,
+        false,
+        DEADLINE,
+    )?;
+    if !output.status.success() {
+        return Err(command_error(&output));
+    }
+    let (parents, message) = parse_commit_message(&output.stdout, &oid)?;
+    let mut command = git_command(root);
+    command.args([
+        "diff-tree",
+        "--numstat",
+        "-z",
+        "-r",
+        "--root",
+        "--no-commit-id",
+        "--find-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+    ]);
+    if let Some(parent) = parents.first() {
+        command.arg(parent);
+    }
+    command.args([&oid, "--"]);
+    let output = run_git(&mut command, COMMIT_DETAILS_LIMIT, false, DEADLINE)?;
+    if !output.status.success() {
+        return Err(command_error(&output));
+    }
+    let (files_changed, insertions, deletions) = parse_commit_numstat(&output.stdout)?;
+    let origin = run_git(
+        git_command(root).args(["config", "--local", "--get", "remote.origin.url"]),
+        COMMIT_DETAILS_LIMIT,
+        false,
+        DEADLINE,
+    )?;
+    let github_url = if origin.status.success() {
+        std::str::from_utf8(&origin.stdout)
+            .ok()
+            .and_then(|remote| github_commit_url(remote, &oid))
+    } else if origin.status.code() == Some(1) {
+        None
+    } else {
+        return Err(command_error(&origin));
+    };
+    Ok(GitCommitDetails {
+        oid,
+        message,
+        files_changed,
+        insertions,
+        deletions,
+        github_url,
+    })
 }
 
 fn validate_path(path: &str) -> Result<(), String> {
@@ -551,6 +1075,28 @@ mod tests {
             self.git(&["commit", "-m", "fixture"]);
         }
 
+        fn oid(&self, revision: &str) -> String {
+            String::from_utf8(self.git(&["rev-parse", "--verify", revision]).stdout)
+                .unwrap()
+                .trim_end_matches('\n')
+                .to_owned()
+        }
+
+        fn commit_named(&self, subject: &str) -> String {
+            self.git(&[
+                "commit",
+                "--allow-empty",
+                "--date=1700000000 +0000",
+                "-m",
+                subject,
+            ]);
+            self.oid("HEAD")
+        }
+
+        fn history(&self, limit: usize) -> GitHistory {
+            history_in(&self.0, limit).unwrap()
+        }
+
         fn status(&self) -> GitStatus {
             status_in(&self.0).unwrap()
         }
@@ -564,6 +1110,604 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn commit_details_cover_root_normal_empty_and_full_message_contract() {
+        let repo = TempRepo::new();
+        repo.write("file", "one\ntwo\n");
+        repo.git(&["add", "file"]);
+        let root = repo.commit_named("root");
+        let details = commit_details_in(&repo.0, &root).unwrap();
+        assert_eq!(
+            (details.files_changed, details.insertions, details.deletions),
+            (1, 2, 0)
+        );
+        assert!(details.github_url.is_none());
+
+        repo.write("file", "two\nthree\n");
+        repo.git(&["add", "file"]);
+        let normal = repo.commit_named("normal");
+        let details = commit_details_in(&repo.0, &normal).unwrap();
+        assert_eq!(
+            (details.files_changed, details.insertions, details.deletions),
+            (1, 1, 1)
+        );
+
+        let message = "完整标题, subject\n\nFirst paragraph.\n\n第二段说明。\n";
+        let empty = repo.commit_named(message);
+        repo.git(&[
+            "config",
+            "remote.origin.url",
+            "https://user:password@github.com/owner/repo.git?token=secret#fragment",
+        ]);
+        repo.write("nested/deeper/file", "untracked");
+        let details = commit_details_in(&repo.0.join("nested/deeper"), &empty).unwrap();
+        assert_eq!(
+            serde_json::to_value(&details).unwrap(),
+            serde_json::json!({
+                "oid": empty,
+                "message": message,
+                "filesChanged": 0,
+                "insertions": 0,
+                "deletions": 0,
+                "githubUrl": format!("https://github.com/owner/repo/commit/{empty}"),
+            })
+        );
+    }
+
+    #[test]
+    fn commit_details_merge_stats_compare_with_the_first_parent() {
+        let repo = TempRepo::new();
+        repo.write("file", "base\n");
+        repo.commit();
+        repo.git(&["checkout", "-b", "feature"]);
+        repo.write("feature", "added on feature\n");
+        repo.commit();
+        repo.git(&["checkout", "main"]);
+        repo.write("file", "main\n");
+        repo.commit();
+        repo.git(&["merge", "--no-ff", "-m", "merge", "feature"]);
+        let details = commit_details_in(&repo.0, &repo.oid("HEAD")).unwrap();
+        assert_eq!(
+            (details.files_changed, details.insertions, details.deletions),
+            (1, 1, 0)
+        );
+    }
+
+    #[test]
+    fn commit_details_numstat_counts_renames_binary_and_special_paths() {
+        let repo = TempRepo::new();
+        #[cfg(not(windows))]
+        let (old, new, added) = ("old\tname\n.txt", "-new\t中文\n.txt", "new\tfile\n.txt");
+        #[cfg(windows)]
+        let (old, new, added) = ("old-name.txt", "-new-中文.txt", "new-file.txt");
+        repo.write(old, "unchanged content\n");
+        repo.write("binary", b"\0\x01\xff");
+        repo.commit();
+        repo.git(&["mv", "--", old, new]);
+        repo.write("binary", b"\0\x02\xff\x03");
+        repo.write(added, "first\nsecond\n");
+        repo.commit();
+        let details = commit_details_in(&repo.0, &repo.oid("HEAD")).unwrap();
+        assert_eq!(
+            (details.files_changed, details.insertions, details.deletions),
+            (3, 2, 0)
+        );
+    }
+
+    #[test]
+    fn commit_details_reject_revision_expressions_options_missing_objects_and_nonrepos() {
+        let repo = TempRepo::new();
+        repo.write("file", "contents\n");
+        repo.commit();
+        let oid = repo.oid("HEAD");
+        for invalid in [
+            "HEAD".to_owned(),
+            "HEAD~1".to_owned(),
+            "HEAD:file".to_owned(),
+            "--all".to_owned(),
+            "-p".to_owned(),
+            oid[..8].to_owned(),
+            format!("{oid}\n"),
+            format!("{oid}/file"),
+            "g".repeat(40),
+        ] {
+            assert!(
+                commit_details_in(&repo.0, &invalid)
+                    .unwrap_err()
+                    .contains("对象 ID")
+            );
+        }
+        for invalid_object in [
+            "f".repeat(40),
+            "f".repeat(64),
+            repo.oid("HEAD:file"),
+            repo.oid("HEAD^{tree}"),
+        ] {
+            assert!(commit_details_in(&repo.0, &invalid_object).is_err());
+        }
+        let plain = TempRepo::directory();
+        assert_eq!(
+            commit_details_in(&plain.0, &oid).unwrap_err(),
+            "当前目录不是 Git 仓库。"
+        );
+        assert!(commit_details_in(&plain.0.join("missing"), &oid).is_err());
+    }
+
+    #[test]
+    fn commit_details_github_urls_support_transports_and_discard_credentials_and_queries() {
+        let oid = "a".repeat(40);
+        let expected = format!("https://github.com/owner/repo/commit/{oid}");
+        for remote in [
+            "https://github.com/owner/repo.git",
+            "https://github.com/owner/repo",
+            "git@github.com:owner/repo.git",
+            "ssh://git@github.com/owner/repo.git",
+            "git://github.com/owner/repo.git",
+            "https://username:password@github.com:443/owner/repo.git?token=secret#fragment",
+            "ssh://username:password@github.com:22/owner/repo.git?token=secret#fragment",
+            "git@github.com:owner/repo.git?token=secret#fragment",
+        ] {
+            assert_eq!(
+                github_commit_url(remote, &oid).as_deref(),
+                Some(expected.as_str()),
+                "{remote}"
+            );
+        }
+        for remote in [
+            "",
+            "/local/repository",
+            "https://gitlab.com/owner/repo.git",
+            "https://github.com.evil.example/owner/repo.git",
+            "https://github.com@evil.example/owner/repo.git",
+            "https://github.com/owner",
+            "https://github.com/owner/repo/extra",
+            "https://github.com/owner/.git",
+            "https://github.com/owner/repo%2Fother.git",
+            "file://github.com/owner/repo.git",
+        ] {
+            assert!(github_commit_url(remote, &oid).is_none(), "{remote}");
+        }
+    }
+
+    #[test]
+    fn commit_details_parsers_require_complete_records_and_valid_numbers() {
+        assert_eq!(
+            parse_commit_numstat(b"2\t1\tpath\twith\ntabs\0-\t-\tbinary\0").unwrap(),
+            (2, 2, 1)
+        );
+        assert_eq!(
+            parse_commit_numstat(b"0\t0\t\0old\tpath\0new\npath\0").unwrap(),
+            (1, 0, 0)
+        );
+        assert_eq!(parse_commit_numstat(b"").unwrap(), (0, 0, 0));
+        for invalid in [
+            b"1\t2\tpath".as_slice(),
+            b"1\t2\0",
+            b"1\t2\tpath\0\0",
+            b"0\t0\t\0old\0",
+            b"0\t0\t\0\0new\0",
+            b"0\t0\t\0old\0\0",
+            b"-\t1\tpath\0",
+            b"1\t-\tpath\0",
+            b"invalid\t2\tpath\0",
+            b"18446744073709551616\t0\tpath\0",
+            b"18446744073709551615\t0\tfirst\0\x31\t0\tsecond\0",
+        ] {
+            assert!(parse_commit_numstat(invalid).is_err(), "{invalid:?}");
+        }
+        let oid = "a".repeat(40);
+        let valid = format!("{oid}\0\0subject\n\nbody\n\0");
+        assert_eq!(
+            parse_commit_message(valid.as_bytes(), &oid).unwrap(),
+            (Vec::new(), "subject\n\nbody\n".to_owned())
+        );
+        for invalid in [
+            valid[..valid.len() - 1].as_bytes().to_vec(),
+            format!("{oid}\0subject\0").into_bytes(),
+            format!("{oid}\0invalid-parent\0subject\0").into_bytes(),
+            format!("{}\0\0subject\0", "b".repeat(40)).into_bytes(),
+            [format!("{oid}\0\0").into_bytes(), b"invalid\xff\0".to_vec()].concat(),
+        ] {
+            assert!(parse_commit_message(&invalid, &oid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn history_linear_commits_preserve_metadata_and_camel_case_contract() {
+        let repo = TempRepo::new();
+        repo.git(&["config", "user.name", "作者, YiTerm"]);
+        let first = repo.commit_named("初始, commit");
+        let second = repo.commit_named("second");
+        let third = repo.commit_named("third\n\nbody is not the subject");
+        let history = repo.history(100);
+        assert_eq!(
+            history
+                .commits
+                .iter()
+                .map(|commit| &commit.oid)
+                .collect::<Vec<_>>(),
+            [&third, &second, &first]
+        );
+        assert_eq!(history.commits[0].parents, [second.clone()]);
+        assert_eq!(history.commits[1].parents, [first.clone()]);
+        assert!(history.commits[2].parents.is_empty());
+        assert_eq!(history.commits[0].subject, "third");
+        assert_eq!(history.commits[2].subject, "初始, commit");
+        assert_eq!(history.commits[2].author_name, "作者, YiTerm");
+        assert_eq!(history.commits[2].author_time, 1_700_000_000);
+        assert!(!history.has_more);
+        let json = serde_json::to_value(&history).unwrap();
+        assert_eq!(
+            json["head"],
+            serde_json::json!({ "oid": third, "refName": "refs/heads/main" })
+        );
+        assert_eq!(
+            json["commits"][2],
+            serde_json::json!({
+                "oid": first,
+                "parents": [],
+                "subject": "初始, commit",
+                "authorName": "作者, YiTerm",
+                "authorTime": 1_700_000_000,
+            })
+        );
+        assert_eq!(
+            json["refs"][0],
+            serde_json::json!({
+                "name": "refs/heads/main",
+                "shortName": "main",
+                "kind": "branch",
+                "oid": history.head.oid,
+            })
+        );
+        assert_eq!(json["hasMore"], false);
+        assert_eq!(json.as_object().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn history_merge_keeps_parent_order_and_topological_order() {
+        let repo = TempRepo::new();
+        let base = repo.commit_named("base");
+        repo.git(&["checkout", "-b", "feature"]);
+        let feature = repo.commit_named("feature");
+        repo.git(&["checkout", "main"]);
+        let main = repo.commit_named("main");
+        repo.git(&["merge", "--no-ff", "-m", "merge feature", "feature"]);
+        let merged = repo.oid("HEAD");
+        let history = repo.history(100);
+        assert_eq!(history.commits.len(), 4);
+        assert_eq!(history.commits[0].oid, merged);
+        assert_eq!(history.commits[0].parents, [main, feature]);
+        assert_eq!(history.commits.last().unwrap().oid, base);
+        for (index, commit) in history.commits.iter().enumerate() {
+            for parent in &commit.parents {
+                let parent_index = history
+                    .commits
+                    .iter()
+                    .position(|item| &item.oid == parent)
+                    .unwrap();
+                assert!(parent_index > index);
+            }
+        }
+    }
+
+    #[test]
+    fn history_includes_detached_head_without_any_ref_to_its_commit() {
+        let repo = TempRepo::new();
+        let base = repo.commit_named("base");
+        repo.git(&["checkout", "--detach", "HEAD"]);
+        let detached = repo.commit_named("unreferenced detached commit");
+        let history = repo.history(100);
+        assert_eq!(history.head.oid.as_deref(), Some(detached.as_str()));
+        assert!(history.head.ref_name.is_none());
+        assert_eq!(history.commits[0].oid, detached);
+        assert_eq!(history.commits[0].parents, [base]);
+        assert!(
+            history
+                .refs
+                .iter()
+                .all(|reference| reference.oid != detached)
+        );
+        assert!(serde_json::to_value(&history).unwrap()["head"]["refName"].is_null());
+    }
+
+    #[test]
+    fn history_distinguishes_empty_unborn_nonrepo_and_nested_folders() {
+        let repo = TempRepo::new();
+        let empty = repo.history(100);
+        assert!(empty.root.is_some());
+        assert!(empty.commits.is_empty());
+        assert!(empty.refs.is_empty());
+        assert!(empty.head.oid.is_none());
+        assert_eq!(empty.head.ref_name.as_deref(), Some("refs/heads/main"));
+        assert!(!empty.has_more);
+
+        let base = repo.commit_named("existing branch");
+        repo.git(&["checkout", "--orphan", "pending/中文,branch"]);
+        let unborn = repo.history(100);
+        assert!(unborn.head.oid.is_none());
+        assert_eq!(
+            unborn.head.ref_name.as_deref(),
+            Some("refs/heads/pending/中文,branch")
+        );
+        assert_eq!(unborn.commits[0].oid, base);
+        assert_eq!(unborn.refs[0].name, "refs/heads/main");
+        repo.write("嵌套/deeper/file", "untracked\n");
+        assert_eq!(
+            history_in(&repo.0.join("嵌套/deeper"), 100).unwrap(),
+            unborn
+        );
+
+        let plain = TempRepo::directory();
+        let nonrepo = plain.history(100);
+        assert_eq!(
+            serde_json::to_value(&nonrepo).unwrap(),
+            serde_json::json!({
+                "root": null,
+                "commits": [],
+                "refs": [],
+                "head": { "oid": null, "refName": null },
+                "hasMore": false,
+            })
+        );
+        assert!(history_in(&plain.0.join("missing"), 100).is_err());
+        plain.write("file", "");
+        assert!(history_in(&plain.0.join("file"), 100).is_err());
+    }
+
+    #[test]
+    fn history_refs_peel_tags_and_preserve_full_unicode_comma_names() {
+        let repo = TempRepo::new();
+        repo.write("file", "blob contents\n");
+        repo.git(&["add", "file"]);
+        let commit = repo.commit_named("tag target");
+        repo.git(&["branch", "共同,名称"]);
+        repo.git(&["tag", "共同,名称"]);
+        repo.git(&["tag", "-a", "注释,标签", "-m", "annotated"]);
+        repo.git(&["tag", "-a", "nested", "注释,标签", "-m", "nested annotated"]);
+        repo.git(&["tag", "-a", "nested-again", "nested", "-m", "twice nested"]);
+        let blob = repo.oid("HEAD:file");
+        let tree = repo.oid("HEAD^{tree}");
+        repo.git(&["tag", "blob", &blob]);
+        repo.git(&["tag", "tree", &tree]);
+        repo.git(&["tag", "-a", "annotated-blob", &blob, "-m", "blob"]);
+        repo.git(&[
+            "tag",
+            "-a",
+            "nested-blob",
+            "annotated-blob",
+            "-m",
+            "nested blob",
+        ]);
+        repo.git(&["tag", "-a", "annotated-tree", &tree, "-m", "tree"]);
+        repo.git(&["update-ref", "refs/remotes/origin/中文,分支", &commit]);
+        repo.git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/中文,分支",
+        ]);
+        // A direct remote ref named HEAD is a real ref, rather than a symbolic alias.
+        repo.git(&["update-ref", "refs/remotes/other/HEAD", &commit]);
+        let history = repo.history(100);
+        let names: Vec<_> = history
+            .refs
+            .iter()
+            .map(|reference| reference.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "refs/heads/main",
+                "refs/heads/共同,名称",
+                "refs/remotes/origin/中文,分支",
+                "refs/remotes/other/HEAD",
+                "refs/tags/nested",
+                "refs/tags/nested-again",
+                "refs/tags/共同,名称",
+                "refs/tags/注释,标签",
+            ]
+        );
+        assert!(history.refs.iter().all(|reference| reference.oid == commit));
+        assert_eq!(history.refs[1].short_name, "共同,名称");
+        assert_eq!(history.refs[2].short_name, "origin/中文,分支");
+        assert_eq!(history.refs[2].kind, GitRefKind::Remote);
+        assert_eq!(history.refs[7].kind, GitRefKind::Tag);
+        let json = serde_json::to_value(&history).unwrap();
+        assert_eq!(json["refs"][2]["kind"], "remote");
+        assert_eq!(json["refs"][7]["kind"], "tag");
+    }
+
+    #[test]
+    fn history_limits_use_one_extra_commit_and_clamp_to_one_thousand() {
+        use std::io::Write;
+
+        let repo = TempRepo::new();
+        repo.commit_named("first");
+        assert!(!repo.history(1).has_more);
+        repo.commit_named("second");
+        assert!(repo.history(1).has_more);
+        assert_eq!(repo.history(0), repo.history(1));
+        assert!(!repo.history(2).has_more);
+        assert!(!repo.history(3).has_more);
+        assert_eq!(repo.history(1).commits[0].parents.len(), 1);
+
+        // Import a real, long linear history in one Git process.
+        let mut child = repo
+            .command(&["fast-import", "--quiet"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            let mut input = child.stdin.take().unwrap();
+            for index in 0..1001 {
+                let subject = format!("imported {index}");
+                write!(input, "commit refs/heads/imported\ncommitter YiTerm Tests <tests@yiterm.invalid> 1700000000 +0000\ndata {}\n{subject}\n\n", subject.len()).unwrap();
+            }
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let capped = repo.history(usize::MAX);
+        assert_eq!(capped, repo.history(1000));
+        assert_eq!(capped.commits.len(), 1000);
+        assert!(capped.has_more);
+    }
+
+    #[test]
+    fn history_retries_head_changes_once_and_rejects_continuous_ref_changes() {
+        let repo = TempRepo::new();
+        repo.commit_named("base");
+        let root = repository_root(&repo.0).unwrap().unwrap();
+        let mut reads = 0;
+        let history = history_at(root.clone(), 100, |path| {
+            reads += 1;
+            if reads == 2 {
+                // OID and refs stay the same: changing just HEAD's symbolic name counts.
+                repo.git(&["checkout", "--detach", "HEAD"]);
+            }
+            read_history_snapshot(path)
+        })
+        .unwrap();
+        assert_eq!(reads, 4);
+        assert!(history.head.ref_name.is_none());
+
+        reads = 0;
+        let error = history_at(root, 100, |path| {
+            reads += 1;
+            if reads == 2 || reads == 4 {
+                repo.git(&[
+                    "update-ref",
+                    &format!("refs/yiterm-tests/moving-{reads}"),
+                    "HEAD",
+                ]);
+            }
+            read_history_snapshot(path)
+        })
+        .unwrap_err();
+        assert_eq!(reads, 4);
+        assert_eq!(error, HISTORY_CHANGED);
+    }
+
+    #[test]
+    fn history_traverses_other_ref_namespaces_without_returning_them_as_labels() {
+        let repo = TempRepo::new();
+        repo.commit_named("base");
+        repo.git(&["checkout", "--detach", "HEAD"]);
+        let other = repo.commit_named("only reachable from another namespace");
+        repo.git(&["checkout", "main"]);
+        repo.git(&["update-ref", "refs/yiterm-tests/other", &other]);
+        let history = repo.history(100);
+        assert!(history.commits.iter().any(|commit| commit.oid == other));
+        assert_eq!(history.refs.len(), 1);
+        assert_eq!(history.refs[0].name, "refs/heads/main");
+    }
+
+    #[test]
+    fn history_log_parser_rejects_incomplete_or_invalid_fields() {
+        let oid = "a".repeat(40);
+        let parent = "b".repeat(40);
+        let record = format!("{oid}\0{parent}\0作者, name\01700000000\0subject, 中文\0");
+        let parsed = parse_history_log(record.as_bytes()).unwrap();
+        assert_eq!(parsed[0].parents, [parent.clone()]);
+        assert_eq!(parsed[0].author_time, 1_700_000_000);
+        assert_eq!(parsed[0].subject, "subject, 中文");
+        assert!(parse_history_log(b"").unwrap().is_empty());
+        let empty = format!("{oid}\0\0\00\0\0");
+        let empty = parse_history_log(empty.as_bytes()).unwrap();
+        assert!(empty[0].parents.is_empty());
+        assert!(empty[0].subject.is_empty());
+        assert!(empty[0].author_name.is_empty());
+        let sha256 = format!("{}\0\0author\0-1\0subject\0", "c".repeat(64));
+        assert_eq!(
+            parse_history_log(sha256.as_bytes()).unwrap()[0].author_time,
+            -1
+        );
+        for invalid in [
+            record[..record.len() - 1].as_bytes().to_vec(),
+            format!("{record}\0").into_bytes(),
+            format!("{oid}\0{parent}\0author\01700000000\0").into_bytes(),
+            format!("short\0\0author\00\0subject\0").into_bytes(),
+            format!("{}\0\0author\00\0subject\0", "g".repeat(40)).into_bytes(),
+            format!("{oid}\0{parent} \0author\00\0subject\0").into_bytes(),
+            format!("{oid}\0bad-parent\0author\00\0subject\0").into_bytes(),
+            format!("{oid}\0\0author\0invalid\0subject\0").into_bytes(),
+            format!("{oid}\0\0author\09223372036854775808\0subject\0").into_bytes(),
+            [
+                format!("{oid}\0\0author\00\0").into_bytes(),
+                b"invalid\xff\0".to_vec(),
+            ]
+            .concat(),
+        ] {
+            assert!(parse_history_log(&invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn history_ref_parser_rejects_truncation_invalid_ids_and_non_utf8_names() {
+        let oid = "a".repeat(40);
+        let record = format!("refs/heads/中文,name\0{oid}\0commit\0\0\0\0\n");
+        assert_eq!(
+            parse_history_refs(record.as_bytes()).unwrap()[0].short_name,
+            "中文,name"
+        );
+        assert!(parse_history_refs(b"").unwrap().is_empty());
+        for invalid in [
+            record[..record.len() - 1].as_bytes().to_vec(),
+            record[..record.len() - 2].as_bytes().to_vec(),
+            format!("{record}\n").into_bytes(),
+            format!("refs/heads/main\0{oid}\0commit\0\0\0\n").into_bytes(),
+            format!("refs/heads/\0{oid}\0commit\0\0\0\0\n").into_bytes(),
+            format!("refs/heads/with space\0{oid}\0commit\0\0\0\0\n").into_bytes(),
+            format!("heads/other/name\0{oid}\0commit\0\0\0\0\n").into_bytes(),
+            b"refs/heads/name\0short\0commit\0\0\0\0\n".to_vec(),
+            format!("refs/tags/tag\0{oid}\0tag\0bad\0commit\0\0\n").into_bytes(),
+            format!("refs/tags/tag\0{oid}\0tag\0{oid}\0unknown\0\0\n").into_bytes(),
+            format!("refs/tags/tag\0{oid}\0unknown\0\0\0\0\n").into_bytes(),
+            [
+                b"refs/heads/invalid\xff\0".to_vec(),
+                format!("{oid}\0commit\0\0\0\0\n").into_bytes(),
+            ]
+            .concat(),
+        ] {
+            assert!(parse_history_refs(&invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn history_rejects_oversized_log_and_refs_instead_of_parsing_prefixes() {
+        let repo = TempRepo::new();
+        let mut message = "large subject ".repeat(HISTORY_OUTPUT_LIMIT / 10);
+        message.push('\n');
+        repo.write("message", message);
+        repo.git(&["commit", "--quiet", "--allow-empty", "-F", "message"]);
+        let error = history_in(&repo.0, 1).unwrap_err();
+        assert_eq!(
+            error,
+            format!("Git 输出超过 {HISTORY_OUTPUT_LIMIT} 字节限制。")
+        );
+
+        let repo = TempRepo::new();
+        let commit = repo.commit_named("base");
+        // Packed refs provide a large real for-each-ref fixture without thousands of processes.
+        let mut packed = String::from("# pack-refs with: sorted\n");
+        for index in 0..30000 {
+            packed.push_str(&format!(
+                "{commit} refs/heads/{index:05}-{}\n",
+                "x".repeat(96)
+            ));
+        }
+        repo.write(".git/packed-refs", packed);
+        assert_eq!(
+            history_in(&repo.0, 1).unwrap_err(),
+            format!("Git 输出超过 {HISTORY_OUTPUT_LIMIT} 字节限制。")
+        );
     }
 
     #[test]
@@ -934,10 +2078,9 @@ mod tests {
         assert!(diff.text.len() <= DIFF_LIMIT);
         assert!(diff.text.starts_with("diff --git "));
         let mut status = repo.command(&["status", "--porcelain=v1", "-z"]);
-        assert!(
-            run_git(&mut status, 2, false, DEADLINE)
-                .unwrap_err()
-                .contains("限制")
+        assert_eq!(
+            run_git(&mut status, 2, false, DEADLINE).unwrap_err(),
+            "Git 输出超过 2 字节限制。"
         );
     }
 

@@ -180,6 +180,44 @@ export const gitStatus = (folder: string) => invoke<GitStatus>('git_status', { f
 export const gitDiff = (folder: string, area: GitArea, path: string) =>
   invoke<GitDiff>('git_diff', { folder, area, path });
 
+export interface GitCommit {
+  oid: string;
+  parents: string[];
+  subject: string;
+  authorName: string;
+  authorTime: number;
+}
+
+export interface GitRef {
+  name: string;
+  shortName: string;
+  kind: 'branch' | 'remote' | 'tag';
+  oid: string;
+}
+
+export interface GitHistory {
+  root: string | null;
+  commits: GitCommit[];
+  refs: GitRef[];
+  head: { oid: string | null; refName: string | null };
+  hasMore: boolean;
+}
+
+export const gitHistory = (folder: string, limit: number) =>
+  invoke<GitHistory>('git_history', { folder, limit });
+
+export interface GitCommitDetails {
+  oid: string;
+  message: string;
+  filesChanged: number;
+  insertions: number;
+  deletions: number;
+  githubUrl: string | null;
+}
+
+export const gitCommitDetails = (folder: string, oid: string) =>
+  invoke<GitCommitDetails>('git_commit_details', { folder, oid });
+
 // ---------- diagnostics ----------
 
 export const debugLog = (message: string) =>
