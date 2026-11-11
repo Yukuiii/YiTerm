@@ -16,6 +16,7 @@ export interface GraphRow {
   oid: string;
   lane: number;
   color: number;
+  width: number;
   segments: GraphSegment[];
 }
 
@@ -67,9 +68,12 @@ export function layoutGitGraph(commits: readonly GitCommit[]) {
       }
       segments.push({ from: lane, to: target, start: 'node', end: 'bottom', color: lanes[target]!.color });
     }
-    laneCount = Math.max(laneCount, lane + 1, lanes.length);
+    const rowLaneCount = Math.max(lane + 1, lanes.length);
+    laneCount = Math.max(laneCount, rowLaneCount);
     while (lanes.length && lanes.at(-1) === null) lanes.pop();
-    return { oid: commit.oid, lane, color, segments };
+    // Reserve room only for tracks crossing this row, rather than the widest
+    // fork elsewhere in the loaded history. The title takes the remaining space.
+    return { oid: commit.oid, lane, color, width: graphX(rowLaneCount - 1) + 12, segments };
   });
   return { rows, width: graphX(laneCount - 1) + 12 };
 }

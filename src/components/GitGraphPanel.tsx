@@ -164,7 +164,7 @@ export default function GitGraphPanel({ folder }: { folder: string }) {
             }
             setDetail(null);
           }}>
-            <div className="git-graph-list" role="list" aria-label="提交历史" style={{ minWidth: graph.width + 140 }}>
+            <div className="git-graph-list" role="list" aria-label="提交历史">
               {history.commits.map((commit, index) => {
                 const row = graph.rows[index];
                 const refs = refsByOid.get(commit.oid) ?? [];
@@ -176,6 +176,7 @@ export default function GitGraphPanel({ folder }: { folder: string }) {
                     data-oid={commit.oid}
                     role="listitem"
                     className={`git-graph-row${isHead ? ' is-head' : ''}${detail?.oid === commit.oid ? ' is-selected' : ''}`}
+                    style={{ minWidth: row.width + 72 }}
                     tabIndex={commit.oid === focusableOid ? 0 : -1}
                     aria-label={description}
                     aria-haspopup="dialog"
@@ -184,7 +185,7 @@ export default function GitGraphPanel({ folder }: { folder: string }) {
                     onFocus={() => setFocusedOid(commit.oid)}
                     onKeyDown={(event) => onRowKeyDown(event, index)}
                   >
-                    <svg className="git-graph-marks" width={graph.width} height={GRAPH_ROW_HEIGHT} aria-hidden="true">
+                    <svg className="git-graph-marks" width={row.width} height={GRAPH_ROW_HEIGHT} aria-hidden="true">
                       {row.segments.map((segment, key) => (
                         <path key={key} className={`git-graph-color-${segment.color}`} d={graphPath(segment)} />
                       ))}

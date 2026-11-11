@@ -52,6 +52,26 @@ test('linear commits share one lane and a root has no outgoing edge', () => {
   assert.deepEqual(plain(layoutGitGraph([])).rows, []);
 });
 
+test('only rows crossing a wider fork reserve extra gutter space', () => {
+  const commits = [
+    commit('tip', 'base'), commit('base'),
+    commit('merge', 'a', 'b', 'c', 'd'),
+    commit('a', 'root'), commit('b', 'root'), commit('c', 'root'), commit('d', 'root'), commit('root'),
+    commit('unrelated-root'),
+  ];
+  const rows = verifyConnections(commits);
+  assert.deepEqual(rows.slice(0, 2).map((row) => row.width), [24, 24]);
+  assert.equal(rows[2].width, 60);
+  assert.equal(rows.at(-1).width, 24);
+  assert.equal(layoutGitGraph(commits).width, 60);
+  for (const row of rows) {
+    assert.ok(row.lane * 12 + 12 + 6.5 <= row.width, 'Every node fits inside its own gutter');
+    for (const segment of row.segments) {
+      assert.ok(Math.max(segment.from, segment.to) * 12 + 12 < row.width, 'Entering and exiting edges remain visible');
+    }
+  }
+});
+
 test('merge paths preserve first-parent order and reconnect at their shared parent', () => {
   const rows = verifyConnections([commit('merge', 'main', 'feature'), commit('feature', 'root'), commit('main', 'root'), commit('root')]);
   assert.equal(rows[0].segments[0].to, 0);
