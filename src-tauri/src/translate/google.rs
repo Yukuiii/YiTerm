@@ -1,7 +1,7 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::ipc::Channel;
 
-use super::{chunk, protect_code, restore_code, TranslateEvent};
+use super::{TranslateEvent, chunk, emit_delta, error_body, protect_code, restore_code};
 
 /// Chrome's built-in translate key (same one the proven proxy uses).
 const CHROME_KEY: &str = "AIzaSyATBXajvzQLTDHEQbcpq0Ihe0vWDHmO520";
@@ -12,7 +12,8 @@ const CHUNK_MAX: usize = 800;
 /// connectivity the connection blackholes, so fail fast and fall through
 /// instead of burning the full client timeout three times in a row.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
-const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/153 Safari/537.36";
+const UA: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/153 Safari/537.36";
 
 /// Chunked Google translation; per chunk: primary endpoint, retry once on
 /// 429/5xx after 1 s, then the translate_a fallback. Emits one Delta per
@@ -37,13 +38,9 @@ pub async fn translate(
                 Ok(out) => out,
                 Err(gtx_err) => {
                     tracing::warn!(error = %gtx_err, "gtx failed, falling back to translateHtml");
-                    chrome_translate(http, &part, target).await.map_err(|e| {
-                        format!(
-                            "Google 免费端点不可达（需要能访问 Google 的网络或代理；\
-                             最近错误: {gtx_err} / {e}）。\
-                             可在设置中切换 Chat 模式使用自定义翻译服务"
-                        )
-                    })?
+                    chrome_translate(http, &part, target)
+                        .await
+                        .map_err(|e| unreachable_error(&gtx_err, &e))?
                 }
             }
         } else {
@@ -54,15 +51,9 @@ pub async fn translate(
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     match chrome_translate(http, &part, target).await {
                         Ok(out) => out,
-                        Err(second_err) => {
-                            gtx_translate(http, &part, target).await.map_err(|_| {
-                                format!(
-                                    "Google 免费端点不可达（需要能访问 Google 的网络或代理；\
-                                     最近错误: {first_err} / {second_err}）。\
-                                     可在设置中切换 Chat 模式使用自定义翻译服务"
-                                )
-                            })?
-                        }
+                        Err(second_err) => gtx_translate(http, &part, target)
+                            .await
+                            .map_err(|_| unreachable_error(&first_err, &second_err))?,
                     }
                 }
             }
@@ -70,12 +61,18 @@ pub async fn translate(
 
         let restored = restore_code(&raw, &blocks);
         acc.push_str(&restored);
-        let _ = channel.send(TranslateEvent::Delta {
-            request_id: request_id.to_string(),
-            text: restored,
-        });
+        emit_delta(channel, request_id, restored);
     }
     Ok(acc)
+}
+
+/// Every endpoint failed for a chunk; name the two most recent errors.
+fn unreachable_error(first: &str, second: &str) -> String {
+    format!(
+        "Google 免费端点不可达（需要能访问 Google 的网络或代理；\
+         最近错误: {first} / {second}）。\
+         可在设置中切换 Chat 模式使用自定义翻译服务"
+    )
 }
 
 async fn chrome_translate(
@@ -98,13 +95,7 @@ async fn chrome_translate(
 
     let status = resp.status();
     if !status.is_success() {
-        let body = resp
-            .text()
-            .await
-            .unwrap_or_default()
-            .chars()
-            .take(256)
-            .collect::<String>();
+        let body = error_body(resp, 256).await;
         return Err(format!("translateHtml HTTP {status}: {body}"));
     }
     let out: Value = resp
@@ -128,11 +119,7 @@ async fn chrome_translate(
     Ok(html_unescape(&joined))
 }
 
-async fn gtx_translate(
-    http: &reqwest::Client,
-    text: &str,
-    target: &str,
-) -> Result<String, String> {
+async fn gtx_translate(http: &reqwest::Client, text: &str, target: &str) -> Result<String, String> {
     let resp = http
         .get(GTX_URL)
         .timeout(REQUEST_TIMEOUT)
@@ -152,10 +139,7 @@ async fn gtx_translate(
     if !status.is_success() {
         return Err(format!("gtx HTTP {status}"));
     }
-    let out: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("gtx decode: {e}"))?;
+    let out: Value = resp.json().await.map_err(|e| format!("gtx decode: {e}"))?;
     let segments = out
         .as_array()
         .and_then(|a| a.first())
@@ -197,7 +181,8 @@ fn html_unescape(s: &str) -> String {
                 _ => {
                     if let Some(num) = entity.strip_prefix('#').and_then(|n| {
                         n.parse::<u32>().ok().or_else(|| {
-                            n.strip_prefix('x').and_then(|h| u32::from_str_radix(h, 16).ok())
+                            n.strip_prefix('x')
+                                .and_then(|h| u32::from_str_radix(h, 16).ok())
                         })
                     }) {
                         char::from_u32(num)

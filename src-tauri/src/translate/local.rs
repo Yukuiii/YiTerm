@@ -21,7 +21,9 @@ use hy_mt_core::model::HunyuanDense;
 use hy_mt_core::sampling::SamplingParams;
 use hy_mt_core::tokenizer::HyTokenizer;
 
-use super::{chunk, protect_code, restore_code, safe_stream_prefix, Direction, TranslateEvent};
+use super::{
+    Direction, StreamRestorer, TranslateEvent, chunk, emit_delta, emit_error, protect_code,
+};
 use crate::state::AppState;
 
 pub const MODEL_FILE: &str = "Hy-MT2-1.8B.Q3_K_M.gguf";
@@ -60,11 +62,11 @@ impl LocalTranslator {
         let file = HyGgufFile::load(path).map_err(|e| format!("读取模型失败: {e}"))?;
         // Build the tokenizer from the GGUF metadata before the file (and
         // its mmap) is dropped; the weights are copied out at load time.
-        let tokenizer =
-            HyTokenizer::from_gguf(file.content()).map_err(|e| format!("加载 tokenizer 失败: {e}"))?;
+        let tokenizer = HyTokenizer::from_gguf(file.content())
+            .map_err(|e| format!("加载 tokenizer 失败: {e}"))?;
         let device = DeviceCtx::cpu();
-        let model =
-            HunyuanDense::load_from(&file, &device).map_err(|e| format!("加载模型权重失败: {e}"))?;
+        let model = HunyuanDense::load_from(&file, &device)
+            .map_err(|e| format!("加载模型权重失败: {e}"))?;
         if tokenizer.family() != model.config.tokenizer_family {
             return Err("tokenizer 与模型家族不匹配，模型文件可能损坏".into());
         }
@@ -96,34 +98,21 @@ impl LocalTranslator {
         let max_new = (prompt.len() * 2).clamp(512, MAX_NEW_TOKENS);
         let mut generator = Generator::new(&mut self.model, &self.tokenizer, params, max_new);
 
-        let mut acc = String::new();
-        let mut pending = String::new(); // may end inside a sentinel
+        let mut restorer = StreamRestorer::new(blocks);
         generator
             .generate(&prompt, |step| {
-                if step.text.is_empty() {
-                    return true;
-                }
-                acc.push_str(&step.text);
-                pending.push_str(&step.text);
-                // Emit everything except a possibly-unfinished sentinel.
-                let safe = safe_stream_prefix(&pending);
-                if safe > 0 {
-                    let out = restore_code(&pending[..safe], blocks);
-                    pending.drain(..safe);
-                    if !out.is_empty() {
-                        emit(&out);
-                    }
+                if !step.text.is_empty()
+                    && let Some(out) = restorer.push(&step.text)
+                {
+                    emit(&out);
                 }
                 true
             })
             .map_err(|e| format!("本地推理失败: {e}"))?;
-        if !pending.is_empty() {
-            let out = restore_code(&pending, blocks);
-            if !out.is_empty() {
-                emit(&out);
-            }
+        if let Some(out) = restorer.flush() {
+            emit(&out);
         }
-        Ok(restore_code(&acc, blocks))
+        Ok(restorer.full())
     }
 }
 
@@ -202,7 +191,9 @@ pub fn status(app: &AppHandle, state: &AppState) -> ModelStatus {
     ModelStatus {
         state: state_str.to_string(),
         downloaded: if state_str == "ready" {
-            std::fs::metadata(&path).map(|m| m.len()).unwrap_or(dl.downloaded)
+            std::fs::metadata(&path)
+                .map(|m| m.len())
+                .unwrap_or(dl.downloaded)
         } else {
             dl.downloaded
         },
@@ -212,7 +203,13 @@ pub fn status(app: &AppHandle, state: &AppState) -> ModelStatus {
     }
 }
 
-fn emit_progress(app: &AppHandle, state: &str, downloaded: u64, total: u64, message: Option<String>) {
+fn emit_progress(
+    app: &AppHandle,
+    state: &str,
+    downloaded: u64,
+    total: u64,
+    message: Option<String>,
+) {
     let _ = app.emit(
         "model-progress",
         ModelProgress {
@@ -287,17 +284,15 @@ async fn download_task(app: &AppHandle) -> Result<(), String> {
 }
 
 /// One download attempt from `url`, resuming from `part` when it exists.
-async fn download_once(
-    app: &AppHandle,
-    path: &Path,
-    part: &Path,
-    url: &str,
-) -> Result<(), String> {
+async fn download_once(app: &AppHandle, path: &Path, part: &Path, url: &str) -> Result<(), String> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
 
     let state = app.state::<AppState>();
-    let mut offset = tokio::fs::metadata(part).await.map(|m| m.len()).unwrap_or(0);
+    let mut offset = tokio::fs::metadata(part)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
     if offset > 0 {
         tracing::info!(offset, "resuming model download");
     }
@@ -363,7 +358,9 @@ async fn download_once(
             last_emit = Instant::now();
         }
     }
-    file.flush().await.map_err(|e| format!("写入模型失败: {e}"))?;
+    file.flush()
+        .await
+        .map_err(|e| format!("写入模型失败: {e}"))?;
     drop(file);
 
     if downloaded < total {
@@ -450,14 +447,6 @@ pub async fn translate(
     request_id: &str,
     channel: &Channel<TranslateEvent>,
 ) -> Result<String, String> {
-    let emit_error = |message: String| -> Result<String, String> {
-        let _ = channel.send(TranslateEvent::Error {
-            request_id: request_id.to_string(),
-            message: message.clone(),
-        });
-        Err(message)
-    };
-
     if text.trim().is_empty() {
         return Ok(String::new());
     }
@@ -465,15 +454,12 @@ pub async fn translate(
     // First use loads the ~1 GB model before any token can be emitted; send
     // an empty delta so the frontend's idle watchdog starts its window from
     // now instead of from the invoke call.
-    let _ = channel.send(TranslateEvent::Delta {
-        request_id: request_id.to_string(),
-        text: String::new(),
-    });
+    emit_delta(channel, request_id, "");
 
     let path = model_path(app);
     let translator = match get_translator(state, &path).await {
         Ok(t) => t,
-        Err(e) => return emit_error(e),
+        Err(e) => return emit_error(channel, request_id, e),
     };
 
     let target = match direction {
@@ -489,12 +475,7 @@ pub async fn translate(
         let mut guard = translator
             .lock()
             .map_err(|_| "本地翻译器状态异常".to_string())?;
-        let mut emit = |piece: &str| {
-            let _ = channel_owned.send(TranslateEvent::Delta {
-                request_id: request_id_owned.clone(),
-                text: piece.to_string(),
-            });
-        };
+        let mut emit = |piece: &str| emit_delta(&channel_owned, &request_id_owned, piece);
         translate_blocking(&mut guard, target, &text, &mut emit)
     })
     .await
@@ -517,7 +498,7 @@ pub async fn translate(
         }
         Err(e) => {
             tracing::warn!(mode = "local", error = %e, "translate failed");
-            emit_error(e)
+            emit_error(channel, request_id, e)
         }
     }
 }
@@ -644,9 +625,13 @@ mod tests {
         let t0 = Instant::now();
         let mut streamed = String::new();
         let mut emit = |s: &str| streamed.push_str(s);
-        let out = translate_blocking(&mut translator, "English", input, &mut emit)
-            .expect("translate");
-        eprintln!("{} ms, streamed {} chars", t0.elapsed().as_millis(), streamed.len());
+        let out =
+            translate_blocking(&mut translator, "English", input, &mut emit).expect("translate");
+        eprintln!(
+            "{} ms, streamed {} chars",
+            t0.elapsed().as_millis(),
+            streamed.len()
+        );
         eprintln!("out: {out}");
         assert!(!out.contains("@@C"), "unrestored sentinel: {out}");
         assert!(out.contains("`npm install`"), "inline code lost: {out}");

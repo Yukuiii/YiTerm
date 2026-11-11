@@ -45,6 +45,43 @@ pub enum TranslateEvent {
     },
 }
 
+/// Streams one translated fragment to the frontend. A closed channel only means
+/// nobody is listening any more, which is not a translation failure.
+pub(crate) fn emit_delta(
+    channel: &Channel<TranslateEvent>,
+    request_id: &str,
+    text: impl Into<String>,
+) {
+    let _ = channel.send(TranslateEvent::Delta {
+        request_id: request_id.to_string(),
+        text: text.into(),
+    });
+}
+
+/// Reports a failed translation on the channel and returns it as the command's
+/// error, so both the stream and the awaited `invoke` carry the message.
+pub(crate) fn emit_error(
+    channel: &Channel<TranslateEvent>,
+    request_id: &str,
+    message: String,
+) -> Result<String, String> {
+    let _ = channel.send(TranslateEvent::Error {
+        request_id: request_id.to_string(),
+        message: message.clone(),
+    });
+    Err(message)
+}
+
+/// Start of a failed response body, for provider error messages.
+pub(crate) async fn error_body(resp: reqwest::Response, max_chars: usize) -> String {
+    resp.text()
+        .await
+        .unwrap_or_default()
+        .chars()
+        .take(max_chars)
+        .collect()
+}
+
 /// True if the string contains Han / Hiragana / Katakana / Hangul.
 /// (The frontend does its own detection; kept for server-side use and tests.)
 #[allow(dead_code)]
@@ -111,8 +148,11 @@ pub fn chunk_utf16(text: &str, max: usize) -> Vec<String> {
             break;
         }
         // Best boundary before the cap; `end` itself when the window holds no
-        // punctuation or whitespace. Always advance to make progress.
-        let cut = chunk_cut_within(&chars, start, end).max(start + 1);
+        // punctuation or whitespace. Unlike `chunk_cut` this never overshoots.
+        // Always advance to make progress.
+        let cut = best_boundary(&chars, start, end)
+            .map_or(end, |(_, cut)| cut)
+            .max(start + 1);
         chunks.push(chars[start..cut].iter().collect());
         start = cut;
     }
@@ -122,35 +162,14 @@ pub fn chunk_utf16(text: &str, max: usize) -> Vec<String> {
     chunks
 }
 
-/// Rightmost best-priority boundary in `[start, end)`, never past `end`.
-/// Mirrors [`chunk_cut`] without its sentence overshoot.
-fn chunk_cut_within(chars: &[char], start: usize, end: usize) -> usize {
-    let window = end - start;
-    let floor = 16.min(window);
-    let mut best: Option<(u8, usize)> = None; // (priority, cut); lower wins
+/// Rightmost boundary of the best available priority in `[start, end)`, as
+/// `(priority, cut)`; the cut never passes `end`. The first few characters are
+/// skipped to avoid pathological one-word chunks.
+fn best_boundary(chars: &[char], start: usize, end: usize) -> Option<(u8, usize)> {
+    let floor = 16.min(end - start);
+    let mut best: Option<(u8, usize)> = None; // lower priority wins
     for i in (start + floor..end).rev() {
         let Some((prio, cut)) = boundary_at(chars, i, end) else {
-            continue;
-        };
-        if best.is_none_or(|(p, _)| prio < p) {
-            best = Some((prio, cut));
-            if prio == 1 {
-                break;
-            }
-        }
-    }
-    best.map(|(_, cut)| cut).unwrap_or(end)
-}
-
-/// Cut index for one chunk: the rightmost newline or sentence end in the
-/// window; failing that, a sentence end a little past the limit (so a long
-/// sentence still ends cleanly), then a clause boundary or whitespace.
-fn chunk_cut(chars: &[char], max: usize) -> usize {
-    let window = max.min(chars.len());
-    let floor = 16.min(window); // avoid pathological one-word chunks
-    let mut best: Option<(u8, usize)> = None; // (priority, cut); lower wins
-    for i in (floor..window).rev() {
-        let Some((prio, cut)) = boundary_at(chars, i, window) else {
             continue;
         };
         if best.is_none_or(|(p, _)| prio < p) {
@@ -160,6 +179,15 @@ fn chunk_cut(chars: &[char], max: usize) -> usize {
             }
         }
     }
+    best
+}
+
+/// Cut index for one chunk: the rightmost newline or sentence end in the
+/// window; failing that, a sentence end a little past the limit (so a long
+/// sentence still ends cleanly), then a clause boundary or whitespace.
+fn chunk_cut(chars: &[char], max: usize) -> usize {
+    let window = max.min(chars.len());
+    let best = best_boundary(chars, 0, window);
     if best.is_none_or(|(p, _)| p > 1) {
         // No sentence boundary fits: allow the chunk to overshoot by up to
         // half a window to finish the sentence, rather than breaking it at
@@ -171,7 +199,7 @@ fn chunk_cut(chars: &[char], max: usize) -> usize {
             }
         }
     }
-    best.map(|(_, cut)| cut).unwrap_or(window)
+    best.map_or(window, |(_, cut)| cut)
 }
 
 /// Classifies one boundary character. Priorities: 1 = newline / sentence
@@ -505,6 +533,55 @@ pub fn safe_stream_prefix(s: &str) -> usize {
     s.len()
 }
 
+/// Restores sentinels in a translation that arrives as a stream of raw deltas.
+/// Text that may still be an unfinished sentinel is held back until it either
+/// completes or the stream ends.
+pub(crate) struct StreamRestorer<'a> {
+    blocks: &'a [ProtectedBlock],
+    raw: String,
+    pending: String,
+}
+
+impl<'a> StreamRestorer<'a> {
+    pub fn new(blocks: &'a [ProtectedBlock]) -> Self {
+        Self {
+            blocks,
+            raw: String::new(),
+            pending: String::new(),
+        }
+    }
+
+    /// Feeds one raw delta; returns the restored text that is safe to show.
+    pub fn push(&mut self, delta: &str) -> Option<String> {
+        self.raw.push_str(delta);
+        self.pending.push_str(delta);
+        let safe = safe_stream_prefix(&self.pending);
+        if safe == 0 {
+            return None;
+        }
+        let out = restore_code(&self.pending[..safe], self.blocks);
+        self.pending.drain(..safe);
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// Releases whatever was held back once the stream has ended.
+    pub fn flush(&mut self) -> Option<String> {
+        let out = restore_code(&std::mem::take(&mut self.pending), self.blocks);
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// True when the provider produced no text at all.
+    pub fn is_empty(&self) -> bool {
+        self.raw.is_empty()
+    }
+
+    /// The whole translation restored in one pass. Unlike the concatenated
+    /// deltas this is exact, so it is what callers return and persist.
+    pub fn full(&self) -> String {
+        restore_code(&self.raw, self.blocks)
+    }
+}
+
 /// Dispatches one translation request to the configured provider, streaming
 /// events into `channel` and returning the final full text.
 pub async fn run(
@@ -516,45 +593,26 @@ pub async fn run(
     request_id: &str,
     channel: &Channel<TranslateEvent>,
 ) -> Result<String, String> {
-    let emit_error = |message: String| -> Result<String, String> {
-        let _ = channel.send(TranslateEvent::Error {
-            request_id: request_id.to_string(),
-            message: message.clone(),
-        });
-        Err(message)
-    };
-
     if text.trim().is_empty() {
         return Ok(String::new());
     }
 
     let result = match settings.mode.as_str() {
         "chat" => {
-            let api_key = api_key.unwrap_or_default();
-            let base = settings
-                .chat_base_url
-                .clone()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            let model = settings
-                .chat_model_id
-                .clone()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
+            let base = settings.chat_base_url.as_deref().unwrap_or_default().trim();
+            let model = settings.chat_model_id.as_deref().unwrap_or_default().trim();
             if base.is_empty() || model.is_empty() {
-                return emit_error("Chat 模式未配置完整（需要 Base URL 和模型 ID）".into());
+                return emit_error(
+                    channel,
+                    request_id,
+                    "Chat 模式未配置完整（需要 Base URL 和模型 ID）".into(),
+                );
             }
             chat::translate(
                 http,
-                &base,
-                &model,
-                if api_key.is_empty() {
-                    None
-                } else {
-                    Some(&api_key)
-                },
+                base,
+                model,
+                api_key.filter(|key| !key.is_empty()),
                 direction,
                 text,
                 request_id,
@@ -600,7 +658,7 @@ pub async fn run(
         }
         Err(e) => {
             tracing::warn!(mode = %settings.mode, direction = ?direction, error = %e, "translate failed");
-            emit_error(e)
+            emit_error(channel, request_id, e)
         }
     }
 }
@@ -894,5 +952,32 @@ mod tests {
         assert_eq!(safe_stream_prefix("hi @@C12@@ tail"), 15);
         // Lone trailing '@' is held.
         assert_eq!(safe_stream_prefix("hi @"), 3);
+    }
+
+    #[test]
+    fn stream_restorer_holds_a_split_sentinel_until_it_completes() {
+        let (protected, blocks) = protect_code("use `cargo test` now");
+        assert_eq!(protected, "use @@C0@@ now");
+        let mut restorer = StreamRestorer::new(&blocks);
+        assert!(restorer.is_empty());
+
+        // The sentinel arrives across three deltas; nothing partial is shown.
+        let mut shown = String::new();
+        for (delta, expected) in [
+            ("使用 @@", Some("使用 ")),
+            ("C0", None),
+            ("@@ 现在 @", Some("`cargo test` 现在 ")),
+        ] {
+            let out = restorer.push(delta);
+            assert_eq!(out.as_deref(), expected, "after {delta:?}");
+            shown.push_str(&out.unwrap_or_default());
+        }
+
+        // The trailing '@' could have opened a sentinel; it is released at the end.
+        assert_eq!(restorer.flush().as_deref(), Some("@"));
+        assert_eq!(restorer.flush(), None);
+        assert!(!restorer.is_empty());
+        assert_eq!(restorer.full(), "使用 `cargo test` 现在 @");
+        assert_eq!(format!("{shown}@"), restorer.full());
     }
 }

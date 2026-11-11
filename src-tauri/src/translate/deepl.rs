@@ -9,7 +9,10 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tauri::ipc::Channel;
 
-use super::{Direction, TranslateEvent, chunk, chunk_utf16, protect_code, restore_code};
+use super::{
+    Direction, TranslateEvent, chunk, chunk_utf16, emit_delta, error_body, protect_code,
+    restore_code,
+};
 
 const CHUNK_MAX: usize = 4000;
 /// DeepLX-style gateways cap the whole text array at 1500 UTF-16 code units
@@ -126,19 +129,16 @@ pub async fn translate(
         }
         // Official DeepL wants an array of texts; DeepLX-style gateways take a
         // plain string.
-        let body = if protocol == Protocol::DeepL {
-            json!({
-                "text": [part],
-                "source_lang": source_lang(direction),
-                "target_lang": target_lang(direction),
-            })
+        let text = if protocol == Protocol::DeepL {
+            json!([part])
         } else {
-            json!({
-                "text": part,
-                "source_lang": source_lang(direction),
-                "target_lang": target_lang(direction),
-            })
+            json!(part)
         };
+        let body = json!({
+            "text": text,
+            "source_lang": source_lang(direction),
+            "target_lang": target_lang(direction),
+        });
         let mut req = http.post(&url).timeout(REQUEST_TIMEOUT).json(&body);
         req = match auth {
             Auth::DeepLAuthKey => req.header("Authorization", format!("DeepL-Auth-Key {api_key}")),
@@ -158,13 +158,7 @@ pub async fn translate(
                 456 => "（本月免费额度已用完）",
                 _ => "",
             };
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_default()
-                .chars()
-                .take(512)
-                .collect::<String>();
+            let body = error_body(resp, 512).await;
             return Err(format!("DeepL HTTP {status}{hint}: {body}"));
         }
 
@@ -175,10 +169,7 @@ pub async fn translate(
         let translated = parse_translation(&out)?;
         let restored = restore_code(&translated, &blocks);
         acc.push_str(&restored);
-        let _ = channel.send(TranslateEvent::Delta {
-            request_id: request_id.to_string(),
-            text: restored,
-        });
+        emit_delta(channel, request_id, restored);
     }
     Ok(acc)
 }
@@ -189,11 +180,11 @@ fn parse_translation(v: &Value) -> Result<String, String> {
     if let Some(text) = v.pointer("/translations/0/text").and_then(Value::as_str) {
         return Ok(text.to_string());
     }
-    if let Some(code) = v.get("code").and_then(Value::as_i64) {
-        if code != 200 {
-            let message = v.get("message").and_then(Value::as_str).unwrap_or("");
-            return Err(format!("DeepLX 返回错误 {code}: {message}"));
-        }
+    if let Some(code) = v.get("code").and_then(Value::as_i64)
+        && code != 200
+    {
+        let message = v.get("message").and_then(Value::as_str).unwrap_or("");
+        return Err(format!("DeepLX 返回错误 {code}: {message}"));
     }
     if let Some(data) = v.get("data").and_then(Value::as_str) {
         return Ok(data.to_string());

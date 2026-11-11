@@ -20,7 +20,9 @@ use tauri::ipc::Channel;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use super::{Direction, TranslateEvent, chunk_utf16, protect_code, restore_code};
+use super::{
+    Direction, TranslateEvent, chunk_utf16, emit_delta, error_body, protect_code, restore_code,
+};
 
 /// Anonymous endpoint; the Pro one needs an OAuth token and is unused here.
 const URL: &str = "https://oneshot-free.www.deepl.com/v1/translate";
@@ -99,18 +101,18 @@ async fn app_version(http: &reqwest::Client) -> String {
     // single App Store query.
     let mut cache = version_cache().lock().await;
     let now = Instant::now();
-    if let (Some(version), Some(fetched_at)) = (&cache.version, cache.fetched_at) {
-        if now.duration_since(fetched_at) < APP_VERSION_TTL {
-            return version.clone();
-        }
+    if let (Some(version), Some(fetched_at)) = (&cache.version, cache.fetched_at)
+        && now.duration_since(fetched_at) < APP_VERSION_TTL
+    {
+        return version.clone();
     }
-    if let Some(attempted_at) = cache.attempted_at {
-        if now.duration_since(attempted_at) < APP_VERSION_RETRY {
-            return cache
-                .version
-                .clone()
-                .unwrap_or_else(|| FALLBACK_APP_VERSION.to_string());
-        }
+    if let Some(attempted_at) = cache.attempted_at
+        && now.duration_since(attempted_at) < APP_VERSION_RETRY
+    {
+        return cache
+            .version
+            .clone()
+            .unwrap_or_else(|| FALLBACK_APP_VERSION.to_string());
     }
     cache.attempted_at = Some(now);
     match fetch_app_version(http).await {
@@ -253,13 +255,7 @@ async fn request(
             429 => "（请求过于频繁，IP 被 DeepL 临时限制，请稍后重试）",
             _ => "",
         };
-        let body = resp
-            .text()
-            .await
-            .unwrap_or_default()
-            .chars()
-            .take(512)
-            .collect::<String>();
+        let body = error_body(resp, 512).await;
         return Err(format!("DeepL 免费通道 HTTP {status}{hint}: {body}"));
     }
     let out: Value = resp
@@ -309,10 +305,7 @@ pub async fn translate(
         let translated = request(http, direction, &version, &part).await?;
         let restored = restore_code(&translated, &blocks);
         acc.push_str(&restored);
-        let _ = channel.send(TranslateEvent::Delta {
-            request_id: request_id.to_string(),
-            text: restored,
-        });
+        emit_delta(channel, request_id, restored);
     }
     Ok(acc)
 }

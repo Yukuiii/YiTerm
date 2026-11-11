@@ -1,9 +1,11 @@
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::ipc::Channel;
 
-use super::{protect_code, restore_code, safe_stream_prefix, Direction, TranslateEvent};
+use super::{
+    Direction, StreamRestorer, TranslateEvent, emit_delta, error_body, protect_code, restore_code,
+};
 
 /// OpenAI-compatible chat translation with SSE streaming. Falls back to a
 /// single non-streamed JSON response when the server doesn't speak SSE.
@@ -59,8 +61,7 @@ pub async fn translate(
 
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        let body = body.chars().take(512).collect::<String>();
+        let body = error_body(resp, 512).await;
         return Err(format!("chat HTTP {status}: {body}"));
     }
 
@@ -72,8 +73,7 @@ pub async fn translate(
 
     if is_sse {
         let mut stream = resp.bytes_stream().eventsource();
-        let mut acc = String::new();
-        let mut pending = String::new(); // may end inside a sentinel
+        let mut restorer = StreamRestorer::new(&blocks);
         while let Some(event) = stream.next().await {
             let event = event.map_err(|e| format!("SSE: {e}"))?;
             if event.data.trim() == "[DONE]" {
@@ -89,51 +89,27 @@ pub async fn translate(
                 if delta.is_empty() {
                     continue;
                 }
-                acc.push_str(delta);
-                pending.push_str(delta);
-                // Emit everything except a possibly-unfinished sentinel.
-                let safe = safe_stream_prefix(&pending);
-                if safe > 0 {
-                    let out = restore_code(&pending[..safe], &blocks);
-                    pending.drain(..safe);
-                    if !out.is_empty() {
-                        let _ = channel.send(TranslateEvent::Delta {
-                            request_id: request_id.to_string(),
-                            text: out,
-                        });
-                    }
+                if let Some(out) = restorer.push(delta) {
+                    emit_delta(channel, request_id, out);
                 }
             }
         }
-        if !pending.is_empty() {
-            let out = restore_code(&pending, &blocks);
-            if !out.is_empty() {
-                let _ = channel.send(TranslateEvent::Delta {
-                    request_id: request_id.to_string(),
-                    text: out,
-                });
-            }
+        if let Some(out) = restorer.flush() {
+            emit_delta(channel, request_id, out);
         }
-        if acc.is_empty() {
+        if restorer.is_empty() {
             return Err("chat 返回为空".into());
         }
-        Ok(restore_code(&acc, &blocks))
+        Ok(restorer.full())
     } else {
-        let v: Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("chat decode: {e}"))?;
+        let v: Value = resp.json().await.map_err(|e| format!("chat decode: {e}"))?;
         let content = v
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
-            .ok_or("chat 响应缺少 choices[0].message.content")?
-            .to_string();
-        let full = restore_code(&content, &blocks);
+            .ok_or("chat 响应缺少 choices[0].message.content")?;
+        let full = restore_code(content, &blocks);
         if !full.is_empty() {
-            let _ = channel.send(TranslateEvent::Delta {
-                request_id: request_id.to_string(),
-                text: full.clone(),
-            });
+            emit_delta(channel, request_id, full.clone());
         }
         Ok(full)
     }
