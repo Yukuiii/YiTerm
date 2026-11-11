@@ -17,8 +17,9 @@ YiTerm is a macOS desktop shell (Tauri 2 + React 19) around the real `claude` CL
 | `npm test` | All frontend tests (`node --experimental-vm-modules --test tests/*.test.mjs`) |
 | `node --experimental-vm-modules --test tests/chat.test.mjs` | One test file |
 | `node --experimental-vm-modules --test --test-name-pattern="lane" tests/gitGraph.test.mjs` | One test case |
-| `cd src-tauri && cargo test` | Rust unit tests (163, mostly in-module `#[cfg(test)]`) |
+| `cd src-tauri && cargo test` | Rust unit tests (in-module `#[cfg(test)]`; the few network tests are `#[ignore]`d) |
 | `cd src-tauri && cargo test munge_rules` | Single Rust test (substring filter) |
+| `cd src-tauri && cargo fmt && cargo clippy --all-targets` | The Rust sources are rustfmt-clean and clippy-clean; keep both that way |
 
 There is no CI config, no `.github`, no Cursor/Copilot rules.
 
