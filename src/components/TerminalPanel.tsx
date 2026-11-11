@@ -104,8 +104,8 @@ export default function TerminalPanel({ convId, focusRequested, onFocused }: {
       // 3. Build the xterm view.
       term = new Terminal({
         cursorBlink: true,
-        fontSize: 12.5,
-        fontFamily: "'Ioskeley Mono Term', ui-monospace, SFMono-Regular, Menlo, monospace",
+        fontSize: DEFAULT_FONT_SIZE,
+        fontFamily: BUNDLED_FONT,
         theme: {
           background: '#0c0c0c',
           foreground: '#d7d7d7',

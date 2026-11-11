@@ -1,6 +1,7 @@
 import { memo, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { Msg } from '../stores/chat';
+import { stripImageMarkers } from '../format';
 import Markdown from './Markdown';
 import { LinkedText } from './ContentLink';
 import PlanCard, { type PlanControls } from './PlanCard';
@@ -51,7 +52,7 @@ export default memo(function MessageBubble({
   // Claude Code stores pasted images as a `[Image #N]` marker inside the
   // prompt text. Restored turns can still carry it, so strip it for display.
   const hasImageMarker = /\[Image #\d+\]/.test(msg.original);
-  const userText = msg.original.replace(/\[Image #\d+\]/g, ' ').replace(/\s+/g, ' ').trim();
+  const userText = stripImageMarkers(msg.original);
   // Keep a plan readable while its translation is incomplete or a replay
   // enriches an older cached body. Ordinary replies still stream translated text.
   const isPlan = !isUser && msg.toolCalls.some((t) => t.name === 'ExitPlanMode');

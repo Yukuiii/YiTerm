@@ -17,6 +17,7 @@ import {
   onConversationInterrupted,
   onSessionUpdate,
   updateCheck,
+  type Settings,
   type UpdateInfo,
 } from './ipc';
 import { useChatStore } from './stores/chat';
@@ -25,6 +26,7 @@ import { useSettingsStore } from './stores/settings';
 import { useTerminalsStore } from './stores/terminals';
 import { useSessionTitles } from './hooks/useSessionTitles';
 import { useGitStatus } from './hooks/useGitStatus';
+import { usePaneSplitter } from './hooks/usePaneSplitter';
 import { createUpdateChecker } from './updates';
 import type { ViewMode } from './types';
 import Sidebar from './components/Sidebar';
@@ -36,6 +38,23 @@ import SettingsPage from './components/SettingsPage';
 import UpdateDialog from './components/UpdateDialog';
 import { FolderIcon, GitBranchIcon, TerminalIcon } from './components/Icons';
 import './App.css';
+
+/** Status-bar label for the configured translation backend. */
+function translationLabel(settings: Settings | null): string {
+  const translation = settings?.translation;
+  switch (translation?.mode) {
+    case 'chat':
+      return translation.chatModelId ? `Chat · ${translation.chatModelId}` : 'Chat 翻译';
+    case 'local':
+      return '本地翻译 · Hy-MT2-1.8B';
+    case 'deepl':
+      return 'DeepL 翻译';
+    case 'dlx':
+      return 'DeepL 免费通道';
+    default:
+      return 'Google 翻译';
+  }
+}
 
 export default function App() {
   const activeId = useConversationsStore((s) => s.activeId);
@@ -152,54 +171,13 @@ export default function App() {
 
   const effectiveNewFolder: string | null = newFolder ?? recentFolders[0] ?? null;
 
-  // Draggable chat/terminal splitter.
-  useEffect(() => {
-    const el = document.getElementById('pane-splitter');
-    if (!el) return;
-    let dragging = false;
-    const onDown = (e: MouseEvent) => {
-      dragging = true;
-      e.preventDefault();
-    };
-    const onMove = (e: MouseEvent) => {
-      if (!dragging) return;
-      const panes = el.parentElement;
-      if (!panes) return;
-      const rect = panes.getBoundingClientRect();
-      const ratio = (e.clientX - rect.left) / rect.width;
-      const clamped = Math.min(Math.max(ratio, 0.2), 0.8);
-      panes.style.setProperty('--chat-size', `${(clamped * 100).toFixed(1)}%`);
-    };
-    const onUp = () => {
-      dragging = false;
-    };
-    el.addEventListener('mousedown', onDown);
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => {
-      el.removeEventListener('mousedown', onDown);
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-  }, [activeId, viewMode]);
+  usePaneSplitter(viewMode === 'code' && activeId !== null);
 
   const activeConv = conversations.find((c) => c.id === activeId) ?? null;
   const headerTitle = activeConv ? (titles[activeConv.id] ?? activeConv.title ?? '会话') : '新建会话';
   const statusFolder = activeConv?.folder ?? effectiveNewFolder;
   const projectGit = useGitStatus(statusFolder);
   const branch = projectGit.status?.root ? projectGit.status.branch ?? 'Detached HEAD' : null;
-  const translationLabel =
-    settings?.translation.mode === 'chat'
-      ? settings.translation.chatModelId
-        ? `Chat · ${settings.translation.chatModelId}`
-        : 'Chat 翻译'
-      : settings?.translation.mode === 'local'
-        ? '本地翻译 · Hy-MT2-1.8B'
-        : settings?.translation.mode === 'deepl'
-          ? 'DeepL 翻译'
-          : settings?.translation.mode === 'dlx'
-            ? 'DeepL 免费通道'
-            : 'Google 翻译';
   const statusKind = !activeId
     ? 'idle'
     : exitCode !== undefined
@@ -251,15 +229,10 @@ export default function App() {
     void revealItemInDir(folder).catch(() => {});
   };
 
-  const handleRevealConfigDir = () => {
-    void appConfigDir()
-      .then((p) => revealItemInDir(p))
-      .catch(() => {});
-  };
-
-  const handleRevealLogsDir = () => {
-    void appLogDir()
-      .then((p) => revealItemInDir(p))
+  /** Reveals an app directory (config, logs) resolved by the Tauri path API. */
+  const revealAppDir = (resolveDir: () => Promise<string>) => {
+    void resolveDir()
+      .then((dir) => revealItemInDir(dir))
       .catch(() => {});
   };
 
@@ -280,8 +253,8 @@ export default function App() {
           onOpenSettings={() => setSettingsOpen(true)}
           onCreateInFolder={handleCreateInFolder}
           onSelect={setActive}
-          onRevealConfig={handleRevealConfigDir}
-          onRevealLogs={handleRevealLogsDir}
+          onRevealConfig={() => revealAppDir(appConfigDir)}
+          onRevealLogs={() => revealAppDir(appLogDir)}
         />
       </SidebarBoundary>
 
@@ -324,10 +297,10 @@ export default function App() {
                   <div className="splitter" id="pane-splitter" />
                   <div className="pane pane-term">
                     <TerminalPanel
-                    convId={activeId}
-                    focusRequested={terminalFocusTarget === activeId}
-                    onFocused={terminalFocused}
-                  />
+                      convId={activeId}
+                      focusRequested={terminalFocusTarget === activeId}
+                      onFocused={terminalFocused}
+                    />
                   </div>
                 </>
               )}
@@ -374,7 +347,7 @@ export default function App() {
             )}
           </div>
           <div className="status-right">
-            <span className="status-item">{translationLabel}</span>
+            <span className="status-item">{translationLabel(settings)}</span>
             <span className="status-item">Claude Code</span>
             <span
               className={`status-dot ${statusKind}`}

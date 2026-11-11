@@ -1,18 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import {
-  chatAttachmentImport,
-  chatImageSave,
-  encodeBytesToBase64,
-  hasCJK,
-  terminalSendPrompt,
-  terminalWrite,
-} from '../ipc';
+import { hasCJK, terminalSendPrompt, terminalWrite } from '../ipc';
 import { useChatStore, type Msg } from '../stores/chat';
 import { useTerminalsStore } from '../stores/terminals';
 import { usePlanApproval } from '../hooks/usePlanApproval';
 import { useComposerKeyboard } from '../hooks/useComposerKeyboard';
+import { useComposerAttachments } from '../hooks/useComposerAttachments';
 import { latestPlanCall } from '../planApproval';
 import { groupToolActivity } from '../toolActivity';
 import MessageBubble from './MessageBubble';
@@ -20,17 +13,6 @@ import ToolActivity from './ToolActivity';
 import { ArrowDownIcon, ArrowUpIcon, FileIcon, PaperclipIcon, XIcon } from './Icons';
 
 const EMPTY_MESSAGES: Msg[] = [];
-
-interface PendingImage {
-  id: string;
-  path: string;
-}
-
-interface PendingFile {
-  id: string;
-  path: string;
-  name: string;
-}
 
 /**
  * Appends file references to the already-translated prompt. Paths are not
@@ -60,9 +42,6 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [images, setImages] = useState<PendingImage[]>([]);
-  const [files, setFiles] = useState<PendingFile[]>([]);
-  const [attaching, setAttaching] = useState(0);
   const messagesRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // One send at a time; a newer token invalidates an in-flight translation
@@ -111,6 +90,9 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
     window.setTimeout(() => setNotice(null), 3000);
   };
 
+  const attachments = useComposerAttachments(convId, flashNotice);
+  const { images, files, attaching } = attachments;
+
   useEffect(() => {
     void useChatStore.getState().hydrate(convId);
   }, [convId]);
@@ -139,74 +121,6 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
   }, [msgs.length, lastMsg?.translation, lastMsg?.original, planState.status?.available,
     planState.submitting, planState.sent, planState.error, notice]);
 
-  /** Persists clipboard images and adds a removable chip for each. */
-  const addPastedImages = async (picked: File[]) => {
-    setAttaching((n) => n + picked.length);
-    for (const file of picked) {
-      try {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        const path = await chatImageSave(convId, file.type, encodeBytesToBase64(bytes));
-        setImages((prev) => [...prev, { id: crypto.randomUUID(), path }]);
-      } catch (e) {
-        flashNotice(`图片添加失败：${String(e)}`);
-      } finally {
-        setAttaching((n) => n - 1);
-      }
-    }
-  };
-
-  /** Files chosen from disk: images join the screenshot flow, other files are
-   *  referenced by path and read by Claude. */
-  const pickAttachments = async () => {
-    let picked: string | string[] | null = null;
-    try {
-      picked = await openDialog({ multiple: true, title: '选择附件' });
-    } catch (e) {
-      flashNotice(`选择附件失败：${String(e)}`);
-      return;
-    }
-    const paths = picked === null ? [] : Array.isArray(picked) ? picked : [picked];
-    if (paths.length === 0) return;
-    setAttaching((n) => n + paths.length);
-    for (const path of paths) {
-      try {
-        const att = await chatAttachmentImport(convId, path);
-        if (att.kind === 'image') {
-          setImages((prev) => [...prev, { id: crypto.randomUUID(), path: att.path }]);
-        } else {
-          setFiles((prev) => [
-            ...prev,
-            { id: crypto.randomUUID(), path: att.path, name: att.name },
-          ]);
-        }
-      } catch (e) {
-        flashNotice(`附件添加失败：${String(e)}`);
-      } finally {
-        setAttaching((n) => n - 1);
-      }
-    }
-  };
-
-  const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    // WebKit exposes pasteboard images through `files` (it converts TIFF to
-    // PNG); `items` is the fallback. An empty type still goes to the backend,
-    // which sniffs the real content.
-    const files: File[] = Array.from(e.clipboardData.files).filter(
-      (f) => f.type === '' || f.type.startsWith('image/'),
-    );
-    if (files.length === 0) {
-      for (const item of Array.from(e.clipboardData.items)) {
-        if (item.kind === 'file' && item.type.startsWith('image/')) {
-          const f = item.getAsFile();
-          if (f) files.push(f);
-        }
-      }
-    }
-    if (files.length === 0) return; // plain-text paste: leave it to the textarea
-    e.preventDefault();
-    void addPastedImages(files);
-  };
-
   const send = async (override?: string) => {
     if (planBlocked) {
       flashNotice('请先选择计划执行方式，或在终端提出修改意见。');
@@ -231,8 +145,7 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
     // translation failure is recoverable through 重试翻译 / 照原文发送.
     if (override === undefined) {
       setInput('');
-      setImages([]);
-      setFiles([]);
+      attachments.clear();
     }
     // A sent turn always brings the view to the newest message.
     scrollToBottom();
@@ -416,7 +329,7 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
                 <button
                   className="attachment-remove"
                   title="移除图片"
-                  onClick={() => setImages((prev) => prev.filter((x) => x.id !== img.id))}
+                  onClick={() => attachments.removeImage(img.id)}
                 >
                   <XIcon size={11} />
                 </button>
@@ -429,7 +342,7 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
                 <button
                   className="attachment-remove"
                   title="移除附件"
-                  onClick={() => setFiles((prev) => prev.filter((x) => x.id !== f.id))}
+                  onClick={() => attachments.removeFile(f.id)}
                 >
                   <XIcon size={11} />
                 </button>
@@ -441,7 +354,7 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
           <button
             className="composer-icon-btn"
             title="添加附件（图片或文件）"
-            onClick={() => void pickAttachments()}
+            onClick={() => void attachments.pickAttachments()}
           >
             <PaperclipIcon size={17} />
           </button>
@@ -455,7 +368,7 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
             }
             disabled={exited !== undefined}
             onChange={(e) => setInput(e.target.value)}
-            onPaste={onPaste}
+            onPaste={attachments.onPaste}
             {...composerKeyboard}
           />
           <button

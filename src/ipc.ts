@@ -1,5 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
-import { Channel } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 // ---------- shared types (mirror Rust serde camelCase) ----------
@@ -395,10 +394,10 @@ export interface UpdateInfo {
   publishedAt: string | null;
 }
 
+/** Mirrors Rust's `UpdateProgress`; failures arrive as the invoke rejection. */
 export type UpdateProgress =
   | { type: 'progress'; downloaded: number; total: number }
-  | { type: 'done'; path: string }
-  | { type: 'error'; message: string };
+  | { type: 'done'; path: string };
 
 export const updateCheck = () => invoke<UpdateInfo | null>('update_check');
 
@@ -411,7 +410,6 @@ export function updateDownload(
     channel.onmessage = (p) => {
       onProgress(p);
       if (p.type === 'done') resolve();
-      else if (p.type === 'error') reject(new Error(p.message));
     };
     invoke<void>('update_download', { url, channel }).catch((e) => reject(e));
   });

@@ -1,6 +1,6 @@
 import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '../stores/chat';
-import { oneLine } from '../format';
+import { oneLine, stripImageMarkers } from '../format';
 
 /**
  * Conversation id → first user prompt (one line). Used for session labels in
@@ -20,8 +20,7 @@ export function useSessionTitles(): Record<string, string> {
         if (first) {
           // Restored image turns keep Claude Code's `[Image #N]` marker in the
           // text; it is noise in a title.
-          const text = first.original.replace(/\[Image #\d+\]/g, ' ').replace(/\s+/g, ' ').trim();
-          out[id] = oneLine(text || '[图片]', 64);
+          out[id] = oneLine(stripImageMarkers(first.original) || '[图片]', 64);
         }
       }
       return out;
