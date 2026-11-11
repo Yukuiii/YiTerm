@@ -24,7 +24,7 @@ import { useConversationsStore } from './stores/conversations';
 import { useSettingsStore } from './stores/settings';
 import { useTerminalsStore } from './stores/terminals';
 import { useSessionTitles } from './hooks/useSessionTitles';
-import { folderName } from './format';
+import { useGitStatus } from './hooks/useGitStatus';
 import { createUpdateChecker } from './updates';
 import type { ViewMode } from './types';
 import Sidebar from './components/Sidebar';
@@ -34,7 +34,7 @@ import { ContentLinkProvider } from './components/ContentLink';
 import TerminalPanel from './components/TerminalPanel';
 import SettingsPage from './components/SettingsPage';
 import UpdateDialog from './components/UpdateDialog';
-import { FolderIcon, TerminalIcon } from './components/Icons';
+import { FolderIcon, GitBranchIcon, TerminalIcon } from './components/Icons';
 import './App.css';
 
 export default function App() {
@@ -186,6 +186,8 @@ export default function App() {
   const activeConv = conversations.find((c) => c.id === activeId) ?? null;
   const headerTitle = activeConv ? (titles[activeConv.id] ?? activeConv.title ?? '会话') : '新建会话';
   const statusFolder = activeConv?.folder ?? effectiveNewFolder;
+  const projectGit = useGitStatus(statusFolder);
+  const branch = projectGit.status?.root ? projectGit.status.branch ?? 'Detached HEAD' : null;
   const translationLabel =
     settings?.translation.mode === 'chat'
       ? settings.translation.chatModelId
@@ -281,6 +283,7 @@ export default function App() {
           titles={titles}
           mode={viewMode}
           userName={userName}
+          gitStatus={projectGit}
           onModeChange={setViewMode}
           onNew={() => void handleNew()}
           onOpenSettings={() => setSettingsOpen(true)}
@@ -360,9 +363,15 @@ export default function App() {
             >
               <FolderIcon size={13} />
               <span className="status-folder">
-                {statusFolder ? folderName(statusFolder) : '未选择项目'}
+                {statusFolder ?? '未选择项目'}
               </span>
             </button>
+            {branch && (
+              <span className="status-branch" role="status" aria-label={`当前分支：${branch}`} title={branch}>
+                <GitBranchIcon size={13} />
+                <span>{branch}</span>
+              </span>
+            )}
             {activeConv && (
               <span
                 className="status-session"

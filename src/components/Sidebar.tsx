@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { Conversation } from '../ipc';
 import type { ViewMode } from '../types';
+import type { GitStatusState } from '../hooks/useGitStatus';
 import { useTerminalsStore } from '../stores/terminals';
 import { folderName, oneLine } from '../format';
 import GitChangesPanel from './GitChangesPanel';
@@ -29,6 +30,7 @@ interface SidebarProps {
   titles: Record<string, string>;
   mode: ViewMode;
   userName: string;
+  gitStatus: GitStatusState;
   onModeChange: (mode: ViewMode) => void;
   onNew: () => void;
   onOpenSettings: () => void;
@@ -45,6 +47,7 @@ export default function Sidebar({
   titles,
   mode,
   userName,
+  gitStatus,
   onModeChange,
   onNew,
   onOpenSettings,
@@ -175,7 +178,7 @@ export default function Sidebar({
             onClick={() => selectView(tab)}
           >
             {tab === 'sessions' ? <ChatIcon size={14} /> : <GitBranchIcon size={14} />}
-            <span>{tab === 'sessions' ? 'Sessions' : 'Git'}</span>
+            <span>{tab === 'sessions' ? '会话' : '工作区'}</span>
           </button>
         ))}
       </div>
@@ -328,13 +331,13 @@ export default function Sidebar({
       >
         {view === 'git' && (activeFolder ? (
           <div className="git-workspace" key={activeFolder}>
-            <GitChangesPanel folder={activeFolder} />
+            <GitChangesPanel folder={activeFolder} gitStatus={gitStatus} />
             <GitGraphPanel folder={activeFolder} />
           </div>
         ) : (
           <div className="sidebar-review-empty">
             <p>选择一个会话以查看项目更改。</p>
-            <button className="sidebar-view-return" onClick={() => selectView('sessions')}>Sessions</button>
+            <button className="sidebar-view-return" onClick={() => selectView('sessions')}>会话</button>
           </div>
         ))}
       </div>

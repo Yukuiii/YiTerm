@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { gitStatus, type GitArea, type GitFileChange, type GitStatus } from '../ipc';
+import { useCallback, useId, useState } from 'react';
+import type { GitArea, GitFileChange } from '../ipc';
+import type { GitStatusState } from '../hooks/useGitStatus';
 import GitDiffDialog from './GitDiffDialog';
 import FileTypeIcon from './FileTypeIcon';
-import { ChevronIcon, GitBranchIcon } from './Icons';
+import { ChevronIcon } from './Icons';
 
 const STATUS_LABELS: Record<string, string> = {
   A: '新增', M: '修改', D: '删除', R: '重命名', C: '复制',
@@ -14,69 +15,20 @@ interface Selection {
   file: GitFileChange;
 }
 
-export default function GitChangesPanel({ folder }: { folder: string }) {
+export default function GitChangesPanel({ folder, gitStatus }: { folder: string; gitStatus: GitStatusState }) {
   const [collapsed, setCollapsed] = useState(false);
-  const [status, setStatus] = useState<GitStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [revision, setRevision] = useState(0);
+  const { status, error, revision, refresh: refreshStatus } = gitStatus;
   const [selection, setSelection] = useState<Selection | null>(null);
-  const expandedRef = useRef(true);
-  const refreshRef = useRef<() => void>(() => {});
   const bodyId = useId();
   const closeDialog = useCallback(() => setSelection(null), []);
-  const refreshStatus = useCallback(() => refreshRef.current(), []);
-
-  // App keys this component by folder. Cleanup also protects against replies
-  // arriving after switching workspaces or leaving code mode.
-  useEffect(() => {
-    const request = { disposed: false, running: false };
-    const refresh = async () => {
-      if (request.disposed || request.running || document.visibilityState !== 'visible') return;
-      request.running = true;
-      try {
-        const next = await gitStatus(folder);
-        if (!request.disposed) {
-          setStatus(next);
-          setError(null);
-          // XY can stay the same while the actual file contents change.
-          setRevision((value) => value + 1);
-        }
-      } catch (e) {
-        if (!request.disposed) setError(String(e));
-      } finally {
-        request.running = false;
-      }
-    };
-    const refreshVisible = () => {
-      if (expandedRef.current) void refresh();
-    };
-    refreshRef.current = () => void refresh();
-    refreshVisible();
-    const timer = window.setInterval(refreshVisible, 5000);
-    window.addEventListener('focus', refreshVisible);
-    document.addEventListener('visibilitychange', refreshVisible);
-    return () => {
-      request.disposed = true;
-      refreshRef.current = () => {};
-      window.clearInterval(timer);
-      window.removeEventListener('focus', refreshVisible);
-      document.removeEventListener('visibilitychange', refreshVisible);
-    };
-  }, [folder]);
-
-  useEffect(() => {
-    expandedRef.current = !collapsed;
-    if (!collapsed) refreshRef.current();
-  }, [collapsed]);
 
   const total = status ? status.staged.length + status.unstaged.length : 0;
-  const branch = status?.branch ?? 'Detached HEAD';
   const selectedFile = selection && status?.[selection.area].find(
     (file) => file.path === selection.file.path,
   );
 
   return (
-    <section className={`git-panel${collapsed ? ' collapsed' : ''}`} aria-label="Document Review">
+    <section className={`git-panel${collapsed ? ' collapsed' : ''}`} aria-label="更改">
       <div className="git-panel-head">
         <button
           className="git-panel-toggle"
@@ -86,7 +38,7 @@ export default function GitChangesPanel({ folder }: { folder: string }) {
           onClick={() => setCollapsed((value) => !value)}
         >
           <ChevronIcon size={13} className={collapsed ? '' : 'expanded'} />
-          <span>Document Review</span>
+          <span>更改</span>
           {status?.root && <span className="git-count">{total}</span>}
         </button>
       </div>
@@ -129,12 +81,6 @@ export default function GitChangesPanel({ folder }: { folder: string }) {
                 </div>
               </div>
             ))}
-          </div>
-        )}
-        {status?.root && (
-          <div className="git-panel-branch" role="status" aria-label={`当前分支：${branch}`} title={branch}>
-            <GitBranchIcon size={14} />
-            <span>{branch}</span>
           </div>
         )}
       </div>
