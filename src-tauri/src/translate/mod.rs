@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod deepl;
+pub mod duckai;
 pub mod google;
 pub mod local;
 pub mod oneshot;
@@ -584,10 +585,13 @@ impl<'a> StreamRestorer<'a> {
 
 /// Dispatches one translation request to the configured provider, streaming
 /// events into `channel` and returning the final full text.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     http: &reqwest::Client,
     settings: &TranslationSettings,
     api_key: Option<&str>,
+    duckai_vqd: Option<&str>,
+    duckai_user_agent: Option<&str>,
     direction: Direction,
     text: &str,
     request_id: &str,
@@ -621,6 +625,12 @@ pub async fn run(
             .await
         }
         "dlx" => oneshot::translate(http, direction, text, request_id, channel).await,
+        "duckai" => match (duckai_vqd, duckai_user_agent) {
+            (Some(vqd), Some(user_agent)) => {
+                duckai::translate(http, direction, text, vqd, user_agent, request_id, channel).await
+            }
+            _ => Err("Duck.ai 凭据缺失，请重试".into()),
+        },
         "deepl" => {
             let protocol = deepl::protocol(settings.deepl_protocol.as_deref());
             deepl::translate(

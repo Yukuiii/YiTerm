@@ -406,7 +406,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // snapshot from scratch would stall for seconds after every update.
     // Instead translate only the text not covered yet, in sentence- or
     // paragraph-sized pieces, and append it to the existing translation.
-    const local = useSettingsStore.getState().settings?.translation.mode === 'local';
+    const mode = useSettingsStore.getState().settings?.translation.mode;
+    const local = mode === 'local';
     const covered = m.translatedFrom ?? '';
     // `!m.error`: a failed run may have appended garbage deltas to
     // `translation`; restart from scratch rather than extending it.
@@ -448,7 +449,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (ev.type === 'delta') get().appendDelta(convId, key, ev.text);
         else if (ev.type === 'done') get().setTranslation(convId, key, base + ev.text, snapshot, coverTo);
         else if (ev.type === 'error') get().setError(convId, key, ev.message);
-      });
+      }, { duckai: mode === 'duckai' });
       get().setTranslation(convId, key, base + final, snapshot, coverTo);
     } catch (e) {
       get().setError(convId, key, String(e));
@@ -471,6 +472,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   translateOutbound: async (convId, key, text, signal) => {
+    const mode = useSettingsStore.getState().settings?.translation.mode;
     const final = await translate(
       'zh-en',
       text,
@@ -479,8 +481,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         else if (ev.type === 'done') get().setTranslation(convId, key, ev.text, text);
         else if (ev.type === 'error') get().setError(convId, key, ev.message);
       },
-      undefined,
-      signal,
+      { signal, duckai: mode === 'duckai' },
     );
     get().setTranslation(convId, key, final, text);
     return final;

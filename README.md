@@ -43,9 +43,10 @@ Claude Code is a great coding agent, but it works in English and its conversatio
 - **Streaming translation** zh → en and en → zh
   - Google's free endpoints out of the box; DeepL with an API key (free tier:
     500k chars/month) or the built-in anonymous DeepL channel (no key, no
-    self-hosted gateway; rate-limited); built-in presets for SiliconFlow and
-    OpenRouter (endpoint and model pre-filled — just paste an API key); or any
-    OpenAI-compatible chat API
+    self-hosted gateway; rate-limited); the built-in Duck.ai channel (no key,
+    challenge solved in the app's webview; rate-limited and blocked on some
+    networks); built-in presets for SiliconFlow and OpenRouter (endpoint and
+    model pre-filled — just paste an API key); or any OpenAI-compatible chat API
   - **Fully offline local mode**: Tencent's Hy-MT2-1.8B runs on CPU inside the
     app (no Ollama, no API key). The Q3_K_M model (~907 MB) is downloaded on
     demand from Settings — nothing downloads automatically at launch.
@@ -136,9 +137,11 @@ YiTerm auto-detects `claude` in `~/.local/bin` or on `PATH`. You can point it at
 - **Translation mode** — Google free endpoints (no key); DeepL (official API
   with a key; free keys end in `:fx` and use the free host; a custom
   `/v2/translate` URL is supported; or the built-in anonymous channel, which
-  needs neither a key nor a gateway but is rate-limited); built-in chat presets
-  for SiliconFlow / OpenRouter or any OpenAI-compatible Chat API; or the
-  embedded Hy-MT2-1.8B model (offline, CPU-only).
+  needs neither a key nor a gateway but is rate-limited); Duck.ai (built-in
+  anonymous channel, no key; its JS challenge runs in a sandboxed webview
+  frame); built-in chat presets for SiliconFlow / OpenRouter or any
+  OpenAI-compatible Chat API; or the embedded Hy-MT2-1.8B model (offline,
+  CPU-only).
   The local model lives in `models/Hy-MT2-1.8B.Q3_K_M.gguf` under the app data
   directory (`~/Library/Application Support/com.yiterm.app` on macOS,
   `%LOCALAPPDATA%\com.yiterm.app` on Windows) and is downloaded from Settings.
@@ -160,6 +163,7 @@ YiTerm auto-detects `claude` in `~/.local/bin` or on `PATH`. You can point it at
 - The chat mirror depends on Claude Code's JSONL transcript format; parser updates may be needed if that format changes.
 - Free Google endpoints can be rate-limited or unreachable without a proxy; use a proxy or Chat mode.
 - The built-in DeepL free channel talks to DeepL's client endpoint anonymously; it is unofficial, rate-limited, and may stop working when DeepL changes its apps.
+- The built-in Duck.ai channel is unofficial: it executes Duck.ai's challenge script inside an isolated frame, is rate-limited per network (HTTP 418), and may stop working when Duck.ai changes its challenge or model ids.
 - Machine translation is approximate — review important technical text before relying on it.
 
 ## Credits

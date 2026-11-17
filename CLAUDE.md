@@ -50,7 +50,7 @@ Nothing reads Claude's replies from the PTY stream (that is xterm-only display);
 - `sessions/mod.rs` — `parse_line` turns one transcript line into `ChatMsg`s; also owns `conversations.json`.
 - `sessions/follower.rs` — transcript tail: turn-busy state, interrupt markers, in-place rewrite/replacement detection, historical-vs-live batching.
 - `sessions/claude.rs` — discovery of `~/.claude.json` projects and existing transcripts for the sidebar.
-- `translate/mod.rs` — chunking, code/paragraph protection, provider dispatch; `google.rs`, `deepl.rs`, `oneshot.rs` (built-in anonymous DeepL channel, mode `dlx`), `chat.rs` (OpenAI-compatible SSE), `local.rs` (Hy-MT2-1.8B via the vendored `vendor/hy-mt-core` crate, Candle CPU).
+- `translate/mod.rs` — chunking, code/paragraph protection, provider dispatch; `google.rs`, `deepl.rs`, `oneshot.rs` (built-in anonymous DeepL channel, mode `dlx`), `duckai.rs` (built-in Duck.ai channel, mode `duckai`; the JS challenge is solved by `src/duckai.ts` in a sandboxed frame), `chat.rs` (OpenAI-compatible SSE), `local.rs` (Hy-MT2-1.8B via the vendored `vendor/hy-mt-core` crate, Candle CPU).
 - `git.rs` — shells out to `git` with output caps and a 10 s deadline for status/diff/history/commit details.
 - `update.rs` — GitHub Releases check + in-place DMG swap (the app is unsigned, so the official Tauri updater is unusable).
 - `state.rs` — `AppState`, and `scutil`-based system proxy detection (a Dock-launched app has no shell env).

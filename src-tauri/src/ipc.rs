@@ -828,6 +828,7 @@ pub fn api_key_set(
 
 // ---------- translate ----------
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn translate(
     app: tauri::AppHandle,
@@ -835,6 +836,8 @@ pub async fn translate(
     request_id: String,
     direction: Direction,
     text: String,
+    vqd: Option<String>,
+    user_agent: Option<String>,
     channel: Channel<TranslateEvent>,
 ) -> Result<String, String> {
     let settings = state.settings.read().unwrap().clone();
@@ -864,6 +867,8 @@ pub async fn translate(
                 &http,
                 &settings.translation,
                 api_key.as_deref(),
+                vqd.as_deref(),
+                user_agent.as_deref(),
                 direction,
                 &text,
                 &request_id,
@@ -885,6 +890,26 @@ pub fn translate_cancel(state: State<'_, AppState>, request_id: String) {
     if let Some(tx) = state.translate_cancels.lock().unwrap().remove(&request_id) {
         let _ = tx.send(());
     }
+}
+
+/// Returns the raw Duck.ai challenge (base64 JS) for the frontend to execute.
+#[tauri::command]
+pub async fn duckai_challenge(
+    state: State<'_, AppState>,
+    user_agent: String,
+) -> Result<String, String> {
+    crate::translate::duckai::challenge(&state.http, &user_agent).await
+}
+
+/// Hashes the executed challenge into the `X-Vqd-Hash-1` header value. Kept
+/// in Rust so the sandboxed solver page needs no WebCrypto.
+#[tauri::command]
+pub fn duckai_build_vqd(
+    result: crate::translate::duckai::ChallengeResult,
+    stack: String,
+    duration_ms: u64,
+) -> Result<String, String> {
+    crate::translate::duckai::build_vqd(result, &stack, duration_ms)
 }
 
 // ---------- local model management ----------

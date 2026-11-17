@@ -264,10 +264,10 @@ export default function SettingsPage({ onClose, onCheckForUpdates }: {
   const chatProvider: ChatProviderId = t.chatProvider ?? 'custom';
   const providerPreset = chatProvider === 'custom' ? null : CHAT_PROVIDERS[chatProvider];
   const deeplProtocol = t.deeplProtocol ?? 'deepl';
-  // Google and the built-in DeepL channel ("dlx") share the "free channel"
-  // choice in the UI.
-  const freeChannel: 'google' | 'dlx' | null =
-    t.mode === 'google' ? 'google' : t.mode === 'dlx' ? 'dlx' : null;
+  // Google, the built-in DeepL channel ("dlx") and Duck.ai share the "free
+  // channel" choice in the UI.
+  const freeChannel =
+    t.mode === 'google' || t.mode === 'dlx' || t.mode === 'duckai' ? t.mode : null;
   const deepLApi = t.mode === 'deepl';
 
   /** Selecting a known provider pre-fills its endpoint and a default model. */
@@ -330,7 +330,9 @@ export default function SettingsPage({ onClose, onCheckForUpdates }: {
     // Apply the draft first so the backend uses it, then test.
     await persistDraft();
     try {
-      const out = await translate('zh-en', '你好，世界！', () => {});
+      const out = await translate('zh-en', '你好，世界！', () => {}, {
+        duckai: t.mode === 'duckai',
+      });
       setTestResult(`✅ "${out}"`);
     } catch (e) {
       setTestResult(`❌ ${String(e)}`);
@@ -410,7 +412,7 @@ export default function SettingsPage({ onClose, onCheckForUpdates }: {
                     />
                     <div>
                       <div className="radio-title">免费通道</div>
-                      <div className="radio-desc">Google 翻译或 DeepL 免费通道，无需 API Key</div>
+                      <div className="radio-desc">Google / DeepL / Duck.ai 免费通道，无需 API Key</div>
                     </div>
                   </label>
                   {freeChannel !== null && (
@@ -432,12 +434,21 @@ export default function SettingsPage({ onClose, onCheckForUpdates }: {
                           >
                             DeepL（DLX）
                           </button>
+                          <button
+                            type="button"
+                            className={`mode-btn ${freeChannel === 'duckai' ? 'active' : ''}`}
+                            onClick={() => patchTranslation({ mode: 'duckai' })}
+                          >
+                            Duck.ai
+                          </button>
                         </div>
                       </label>
                       <div className="radio-desc">
                         {freeChannel === 'google'
                           ? '使用 Google 免费端点；可能遇到限流'
-                          : '内置 DeepL 匿名通道，无需 Key、无需自建服务；有频率限制'}
+                          : freeChannel === 'dlx'
+                            ? '内置 DeepL 匿名通道，无需 Key、无需自建服务；有频率限制'
+                            : '内置 Duck.ai 匿名通道，无需 Key；上游限流严格，部分网络不可用'}
                       </div>
                     </div>
                   )}

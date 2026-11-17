@@ -1,6 +1,8 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
+import { duckaiCredential, invalidateDuckaiCredential, type DuckaiCredential } from './duckai';
+
 // ---------- shared types (mirror Rust serde camelCase) ----------
 
 export interface Conversation {
@@ -20,7 +22,7 @@ export interface ConversationsOverview {
 }
 
 export interface TranslationSettings {
-  mode: 'google' | 'dlx' | 'chat' | 'local' | 'deepl';
+  mode: 'google' | 'dlx' | 'duckai' | 'chat' | 'local' | 'deepl';
   targetZh: string;
   chatProvider: 'custom' | 'siliconflow' | 'openrouter';
   chatBaseUrl: string | null;
@@ -289,70 +291,119 @@ export function onModelProgress(cb: (p: ModelProgress) => void): Promise<Unliste
 
 // ---------- translate ----------
 
+export interface TranslateOptions {
+  idleTimeoutMs?: number;
+  signal?: AbortSignal;
+  /** Duck.ai needs a solved JS challenge before the backend request starts. */
+  duckai?: boolean;
+}
+
 /**
  * Runs one translation, streaming incremental deltas into the channel.
  * Resolves with the final full text (the Done payload).
  *
  * A watchdog rejects if no event arrives for `idleTimeoutMs`, so a hung
  * network path can never leave the UI stuck on “翻译中…” forever.
+ *
+ * Duck.ai caches a solved challenge; if the upstream rejects it the cache is
+ * dropped and the whole translation is retried once — only when no delta was
+ * emitted, so retries can never duplicate text.
  */
-export function translate(
+export async function translate(
   direction: Direction,
   text: string,
   onUpdate: (ev: TranslateEvent) => void,
-  idleTimeoutMs = 25_000,
-  signal?: AbortSignal,
+  options: TranslateOptions = {},
 ): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    const requestId = crypto.randomUUID();
-    const channel = new Channel<TranslateEvent>();
-    let timer: number | undefined;
-    let aborted = false;
+  const { idleTimeoutMs = 25_000, signal, duckai = false } = options;
+  const abortedError = () => new DOMException('翻译已取消', 'AbortError');
+  if (signal?.aborted) throw abortedError();
 
-    const onAbort = () => {
-      aborted = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-      void invoke('translate_cancel', { requestId }).catch(() => {});
-      reject(new DOMException('翻译已取消', 'AbortError'));
-    };
-    const settle = () => {
-      if (timer !== undefined) window.clearTimeout(timer);
-      signal?.removeEventListener('abort', onAbort);
-    };
-    const arm = () => {
-      if (timer !== undefined) window.clearTimeout(timer);
-      timer = window.setTimeout(() => {
+  let credential: DuckaiCredential | undefined;
+  if (duckai) {
+    credential = await duckaiCredential();
+    if (signal?.aborted) throw abortedError();
+  }
+
+  let emitted = false;
+  const run = (credential: DuckaiCredential | undefined): Promise<string> =>
+    new Promise<string>((resolve, reject) => {
+      emitted = false;
+      const requestId = crypto.randomUUID();
+      const channel = new Channel<TranslateEvent>();
+      let timer: number | undefined;
+      let aborted = false;
+
+      const onAbort = () => {
         aborted = true;
-        settle();
+        if (timer !== undefined) window.clearTimeout(timer);
         void invoke('translate_cancel', { requestId }).catch(() => {});
-        reject(new Error('翻译服务无响应（超时），请检查网络或翻译设置'));
-      }, idleTimeoutMs);
-    };
-    channel.onmessage = (ev) => {
-      if (aborted) return;
+        reject(abortedError());
+      };
+      const settle = () => {
+        if (timer !== undefined) window.clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const arm = () => {
+        if (timer !== undefined) window.clearTimeout(timer);
+        timer = window.setTimeout(() => {
+          aborted = true;
+          settle();
+          void invoke('translate_cancel', { requestId }).catch(() => {});
+          reject(new Error('翻译服务无响应（超时），请检查网络或翻译设置'));
+        }, idleTimeoutMs);
+      };
+      channel.onmessage = (ev) => {
+        if (aborted) return;
+        // A stale challenge is retried below; surfacing that error event
+        // would flash an error badge before the retry succeeds.
+        if (ev.type === 'error' && ev.message.includes('DUCKAI_VQD_INVALID')) return;
+        if (ev.type === 'delta') emitted = true;
+        arm();
+        onUpdate(ev);
+      };
       arm();
-      onUpdate(ev);
-    };
-    arm();
-    if (signal) {
-      if (signal.aborted) {
-        onAbort();
-        return;
+      if (signal) {
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
       }
-      signal.addEventListener('abort', onAbort, { once: true });
-    }
-    invoke<string>('translate', { requestId, direction, text, channel })
-      .then((final) => {
-        if (aborted) return;
-        settle();
-        resolve(final);
+      invoke<string>('translate', {
+        requestId,
+        direction,
+        text,
+        channel,
+        vqd: credential?.vqd ?? null,
+        userAgent: credential?.userAgent ?? null,
       })
-      .catch((e) => {
-        if (aborted) return;
-        settle();
-        reject(e);
-      });
-  });
+        .then((final) => {
+          if (aborted) return;
+          settle();
+          resolve(final);
+        })
+        .catch((e) => {
+          if (aborted) return;
+          settle();
+          reject(e);
+        });
+    });
+
+  try {
+    return await run(credential);
+  } catch (e) {
+    const message = String(e);
+    if (!duckai || emitted || !message.includes('DUCKAI_VQD_INVALID')) throw e;
+    invalidateDuckaiCredential();
+    credential = await duckaiCredential();
+    if (signal?.aborted) throw abortedError();
+    try {
+      return await run(credential);
+    } catch (retry) {
+      throw new Error(String(retry).replace('DUCKAI_VQD_INVALID: ', ''));
+    }
+  }
 }
 
 // ---------- events ----------

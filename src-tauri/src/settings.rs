@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct TranslationSettings {
     /// "google" (free endpoint), "dlx" (built-in DeepL anonymous channel),
-    /// "deepl" (official API or a DeepLX-compatible gateway), "chat"
-    /// (OpenAI-compatible), or "local" (embedded Hy-MT2-1.8B, offline).
+    /// "duckai" (built-in Duck.ai anonymous channel), "deepl" (official API
+    /// or a DeepLX-compatible gateway), "chat" (OpenAI-compatible), or
+    /// "local" (embedded Hy-MT2-1.8B, offline).
     #[serde(default = "default_mode")]
     pub mode: String,
     /// Target language for the en→native direction.
