@@ -338,6 +338,17 @@ function assistantLine(key, text, overrides = {}) {
   };
 }
 
+test('the transcript model survives assistant upserts', async () => {
+  const { store } = await setup();
+  store.getState().upsertFromSession(
+    'conv', [assistantLine('a', 'hello', { model: 'claude-sonnet-4-5' })], false,
+  );
+  assert.equal(store.getState().byConv.conv[0].model, 'claude-sonnet-4-5');
+  // Block-scoped snapshots may omit the model; they must not erase what we saw.
+  store.getState().upsertFromSession('conv', [assistantLine('a', 'hello!', { done: true })], false);
+  assert.equal(store.getState().byConv.conv[0].model, 'claude-sonnet-4-5');
+});
+
 test('a transcript prompt reconciles with its optimistic bubble and keeps the local key', async () => {
   const { store } = await setup();
   const key = store.getState().addOptimistic('conv', '你好');

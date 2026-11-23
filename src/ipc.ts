@@ -67,6 +67,8 @@ export interface ChatMsg {
   toolCalls: ToolCall[];
   toolResult: ToolResult | null;
   ts: string | null;
+  /** Assistant model id from `message.model`; absent for user turns. */
+  model: string | null;
   done: boolean;
   /** The prompt was interrupted before any assistant reply. */
   interrupted?: boolean;

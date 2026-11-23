@@ -66,6 +66,9 @@ pub struct ChatMsg {
     #[serde(default)]
     pub tool_result: Option<ToolResult>,
     pub ts: Option<String>,
+    /// Assistant model id from the transcript (`message.model`), when present.
+    #[serde(default)]
+    pub model: Option<String>,
     pub done: bool,
     /// The prompt was sent but the turn was interrupted before any assistant
     /// reply.
@@ -241,6 +244,7 @@ fn user_msg(key: &str, text: String, ts: Option<String>) -> ChatMsg {
         tool_calls: Vec::new(),
         tool_result: None,
         ts,
+        model: None,
         done: true,
         interrupted: false,
     }
@@ -306,6 +310,7 @@ fn parse_user_blocks(v: &Value, blocks: &[Value], ts: Option<String>) -> Vec<Cha
                 text: truncate_chars(&text, TOOL_RESULT_MAX),
             }),
             ts: ts.clone(),
+            model: None,
             done: true,
             interrupted: false,
         });
@@ -438,6 +443,11 @@ fn parse_assistant_line(v: &Value, message: &Value, ts: Option<String>) -> Vec<C
         return Vec::new();
     }
     let done = message.get("stop_reason").is_some();
+    let model = message
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|m| !m.is_empty() && *m != "<synthetic>")
+        .map(str::to_string);
     vec![ChatMsg {
         key,
         role: Role::Assistant,
@@ -446,6 +456,7 @@ fn parse_assistant_line(v: &Value, message: &Value, ts: Option<String>) -> Vec<C
         tool_calls,
         tool_result: None,
         ts,
+        model,
         done,
         interrupted: false,
     }]
@@ -651,6 +662,30 @@ mod tests {
         assert_eq!(m.tool_calls[0].label, "ls -la && echo hi");
         assert_eq!(m.tool_calls[0].detail, "ls -la && echo hi");
         assert!(m.done);
+    }
+
+    #[test]
+    fn assistant_model_is_kept_but_synthetic_is_dropped() {
+        let real = json!({
+            "type": "assistant", "uuid": "a1",
+            "message": {
+                "id": "msg_1", "model": "claude-sonnet-4-5",
+                "content": [ { "type": "text", "text": "hi" } ]
+            }
+        });
+        assert_eq!(
+            parse_line(&real)[0].model.as_deref(),
+            Some("claude-sonnet-4-5")
+        );
+
+        let synthetic = json!({
+            "type": "assistant", "uuid": "a2",
+            "message": {
+                "id": "msg_2", "model": "<synthetic>",
+                "content": [ { "type": "text", "text": "hi" } ]
+            }
+        });
+        assert_eq!(parse_line(&synthetic)[0].model, None);
     }
 
     fn exit_plan_message(input: Value) -> Value {

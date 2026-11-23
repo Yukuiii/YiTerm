@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Terminal } from '@xterm/xterm';
+import { Terminal, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Channel } from '@tauri-apps/api/core';
 import {
@@ -16,6 +16,57 @@ import '@xterm/xterm/css/xterm.css';
 const DEFAULT_FONT_SIZE = 13;
 const DEFAULT_LINE_HEIGHT = 1.1;
 const BUNDLED_FONT = "'Ioskeley Mono Term', ui-monospace, SFMono-Regular, Menlo, monospace";
+
+/* xterm paints on a canvas, so its colors cannot come from CSS variables.
+   These mirror --term-bg / --term-fg and the Ansi palette in App.css. */
+const DARK_THEME: ITheme = {
+  background: '#0d0d0c',
+  foreground: '#e7e6e1',
+  cursor: '#f0efec',
+  selectionBackground: 'rgba(255, 255, 255, 0.18)',
+};
+
+const LIGHT_THEME: ITheme = {
+  background: '#f6f6f4',
+  foreground: '#24292f',
+  cursor: '#0969da',
+  selectionBackground: 'rgba(9, 105, 218, 0.20)',
+  black: '#24292f',
+  red: '#cf222e',
+  green: '#116329',
+  yellow: '#4d2d00',
+  blue: '#0969da',
+  magenta: '#8250df',
+  cyan: '#1b7c83',
+  white: '#6e7781',
+  brightBlack: '#57606a',
+  brightRed: '#a40e26',
+  brightGreen: '#1a7f37',
+  brightYellow: '#633c01',
+  brightBlue: '#218bff',
+  brightMagenta: '#a475f9',
+  brightCyan: '#3192aa',
+  brightWhite: '#8c959f',
+};
+
+function xtermTheme(dark: boolean): ITheme {
+  return dark ? DARK_THEME : LIGHT_THEME;
+}
+
+function systemPrefersDark(): boolean {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+function useSystemDark(): boolean {
+  const [dark, setDark] = useState(systemPrefersDark);
+  useEffect(() => {
+    const query = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => setDark(query.matches);
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
+  return dark;
+}
 
 function fontStack(family?: string | null): string {
   const custom = family?.replace(/["']/g, '').trim();
@@ -61,6 +112,10 @@ export default function TerminalPanel({ convId, focusRequested, onFocused }: {
   const settingsRef = useRef(termSettings);
   settingsRef.current = termSettings;
   const [attempt, setAttempt] = useState(0);
+  // Theme for the canvas-drawn terminal; follows the system appearance.
+  const dark = useSystemDark();
+  const darkRef = useRef(dark);
+  darkRef.current = dark;
   const ensureStarted = useTerminalsStore((s) => s.ensureStarted);
   const markExited = useTerminalsStore((s) => s.markExited);
   const exited = useTerminalsStore((s) => (convId in s.exited ? s.exited[convId] : undefined));
@@ -106,12 +161,7 @@ export default function TerminalPanel({ convId, focusRequested, onFocused }: {
         cursorBlink: true,
         fontSize: DEFAULT_FONT_SIZE,
         fontFamily: BUNDLED_FONT,
-        theme: {
-          background: '#0c0c0c',
-          foreground: '#d7d7d7',
-          cursor: '#d7d7d7',
-          selectionBackground: 'rgba(255, 255, 255, 0.18)',
-        },
+        theme: xtermTheme(darkRef.current),
         scrollback: 5000,
       });
       fit = new FitAddon();
@@ -188,6 +238,12 @@ export default function TerminalPanel({ convId, focusRequested, onFocused }: {
     const id = terminalIdRef.current;
     if (id !== null) void terminalResize(id, term.cols, term.rows);
   }, [fontFamily, fontSize, lineHeight]);
+
+  // Repaint the canvas when macOS switches between light and dark.
+  useEffect(() => {
+    const term = termRef.current;
+    if (term) term.options.theme = xtermTheme(dark);
+  }, [dark]);
 
   return (
     <div className="term-panel">

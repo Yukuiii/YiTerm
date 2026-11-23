@@ -10,7 +10,7 @@ import { transformWithOxc } from 'vite';
 
 // Render the actual activity component without a desktop bridge or new test dependencies.
 const context = createContext({ URL });
-const files = ['src/toolActivity.ts', 'src/format.ts', 'src/links.ts', 'src/components/ContentLink.tsx', 'src/components/Icons.tsx', 'src/components/ToolActivity.tsx'];
+const files = ['src/toolActivity.ts', 'src/format.ts', 'src/links.ts', 'src/components/ContentLink.tsx', 'src/components/Icons.tsx', 'src/components/ToolActivity.tsx', 'src/components/CopyButton.tsx', 'src/components/LiveDots.tsx'];
 const modules = new Map(await Promise.all(files.map(async (file) => {
   const url = new URL(`../${file}`, import.meta.url);
   const source = await readFile(url, 'utf8');
@@ -41,7 +41,7 @@ const { groupToolActivity, summarizeToolActivity } = modules.get(new URL('../src
 const tool = (id, name = 'Read', overrides = {}) => ({ id, name, detail: `${id}.ts`, result: 'output', ...overrides });
 const message = (key, toolCalls = [], overrides = {}) => ({
   key, role: 'assistant', original: '', translation: null, working: false,
-  error: null, ts: null, thinking: null, toolCalls, done: true, ...overrides,
+  error: null, ts: null, model: null, thinking: null, toolCalls, done: true, ...overrides,
 });
 
 test('consecutive transcript messages share one group without losing call order or results', () => {
@@ -156,7 +156,9 @@ test('the rendered disclosure starts collapsed and keeps commands, outputs and t
       message('b', [tool('shell', 'Bash', { detail: 'git status', result: '' })]),
     ],
   }));
-  assert.match(markup, /^<details class="tool-activity">/);
+  assert.match(markup, /^<div class="disclosure tool-activity/);
+  assert.match(markup, /aria-expanded="false"/);
+  assert.match(markup, /class="disclosure-inner" inert=""/);
   assert.match(markup, /思考了 1 次，读取了 1 个文件，使用了 1 个工具/);
   assert.match(markup, /class="tool-activity-list"/);
   assert.match(markup, /File contents/);
@@ -174,18 +176,30 @@ test('thinking-only activity has a counted summary and keeps its full text insid
       message('blank', [], { thinking: '  ' }),
     ],
   }));
-  const summaryEnd = markup.indexOf('</summary>');
+  const summaryEnd = markup.indexOf('</button>');
   assert.match(markup.slice(0, summaryEnd), /思考了 2 次/);
   assert.doesNotMatch(markup.slice(0, summaryEnd), /Waiting for agent results|Reviewing file icon assets/);
-  assert.equal((markup.match(/class="thinking-line"/g) ?? []).length, 2);
-  assert.ok(markup.indexOf('class="thinking-line"') > markup.indexOf('class="tool-activity-list"'));
+  assert.equal((markup.match(/class="disclosure thinking-line/g) ?? []).length, 2);
+  assert.ok(markup.indexOf('disclosure thinking-line') > markup.indexOf('class="tool-activity-list"'));
+});
+
+test('a live group is forced open and shows the quiet dots', () => {
+  const markup = renderToStaticMarkup(createElement(ToolActivity, {
+    messages: [message('a', [tool('pending', 'Read', { result: undefined })])],
+    live: true,
+  }));
+  assert.match(markup, /aria-expanded="true"/);
+  assert.match(markup, /disclosure tool-activity\s+is-open/);
+  assert.match(markup, /timeline-quiet-dots/);
+  const beforeList = markup.slice(0, markup.indexOf('class="tool-activity-list"'));
+  assert.doesNotMatch(beforeList, /inert=""/);
 });
 
 test('failure and pending counts stay visible in the collapsed summary', () => {
   const markup = renderToStaticMarkup(createElement(ToolActivity, {
     messages: [message('a', [tool('failed', 'Bash', { isError: true, result: 'Permission denied' }), tool('pending', 'Read', { result: undefined })])],
   }));
-  const summary = markup.slice(0, markup.indexOf('</summary>'));
+  const summary = markup.slice(0, markup.indexOf('</button>'));
   assert.match(summary, /1 项失败/);
   assert.match(summary, /1 项等待输出/);
   assert.match(markup, /Permission denied/);

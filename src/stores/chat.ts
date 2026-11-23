@@ -44,6 +44,8 @@ export interface Msg {
   working: boolean;
   error: string | null;
   ts: string | null;
+  /** Assistant model id from the transcript; null for user turns and old caches. */
+  model: string | null;
   thinking: string | null;
   toolCalls: ToolCallItem[];
   /** true = 用户直接在终端敲的输入（不参与发送翻译流） */
@@ -215,6 +217,7 @@ function localUserMsg(text: string, working: boolean, images?: string[], files?:
     // An image-bearing turn never reconciles with the transcript (its JSONL
     // content is an array), so it needs its own timestamp now.
     ts: images?.length ? new Date().toISOString() : null,
+    model: null,
     thinking: null,
     toolCalls: [],
     images: images?.length ? images : undefined,
@@ -273,8 +276,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 ...m,
                 // A crash mid-translation leaves working=true forever — settle it.
                 working: false,
-                // Older caches predate tool capture.
+                // Older caches predate tool capture and model capture.
                 toolCalls: m.toolCalls ?? [],
+                model: m.model ?? null,
               };
               return restored;
             }),
@@ -579,7 +583,7 @@ function reconcileUserTurn(convId: string, m: ChatMsg) {
       ...s.byConv,
       [convId]: [...(s.byConv[convId] ?? []), {
         key: m.key, role: 'user', original: display, translation: null,
-        working: false, error: null, ts: m.ts, thinking: null, toolCalls: [],
+        working: false, error: null, ts: m.ts, model: null, thinking: null, toolCalls: [],
         fromTerminal: true, sessionKey: m.key,
         hadImages: hadImages || undefined,
         interrupted: m.interrupted || undefined,
@@ -622,7 +626,7 @@ function upsertAssistantTurn(convId: string, m: ChatMsg, shouldTranslate: boolea
   if (!existing) {
     const msg: Msg = {
       key: m.key, role: 'assistant', original: m.text, translation: null,
-      working: false, error: null, ts: m.ts, thinking: m.thinking,
+      working: false, error: null, ts: m.ts, model: m.model ?? null, thinking: m.thinking,
       toolCalls: mergeToolCalls([], m.toolCalls),
       translatedFrom: undefined, done: m.done,
     };
@@ -636,6 +640,7 @@ function upsertAssistantTurn(convId: string, m: ChatMsg, shouldTranslate: boolea
       thinking: m.thinking ?? prev.thinking,
       toolCalls: mergeToolCalls(prev.toolCalls, m.toolCalls),
       ts: m.ts ?? prev.ts,
+      model: m.model ?? prev.model,
       // Block-scoped lines arrive separately; once a turn is done it
       // must stay done even if a late line reports false.
       done: prev.done || m.done,

@@ -16,6 +16,7 @@ const files = [
   'src/components/ContentLink.tsx', 'src/components/Markdown.tsx',
   'src/components/Icons.tsx', 'src/components/ToolActivity.tsx',
   'src/components/MessageBubble.tsx', 'src/components/PlanCard.tsx',
+  'src/components/CopyButton.tsx', 'src/components/CodeBlock.tsx', 'src/components/LiveDots.tsx',
 ];
 const modules = new Map(await Promise.all(files.map(async (file) => {
   const url = new URL(`../${file}`, import.meta.url);
@@ -52,7 +53,7 @@ const render = (Component, props) => renderToStaticMarkup(createElement(Componen
 const urls = (text) => [...splitLinks(text)].flatMap((part) => part.href ? [part.href] : []);
 const message = (overrides = {}) => ({
   key: 'message', role: 'assistant', original: '', translation: null, working: false,
-  error: null, ts: null, thinking: null, toolCalls: [], done: true, ...overrides,
+  error: null, ts: null, model: null, thinking: null, toolCalls: [], done: true, ...overrides,
 });
 
 test('normalizes supported external destinations and leaves unsupported schemes inactive', () => {
@@ -107,9 +108,35 @@ test('bare Markdown URLs exclude adjacent Chinese sentence punctuation', () => {
 test('inline and fenced code URLs become clickable while their code markup stays intact', () => {
   const html = render(Markdown, { children: '`https://inline.example/docs`\n\n```sh\ncurl "https://code.example/api"\n```' });
   assert.match(html, /<code><a [^>]*href="https:\/\/inline.example\/docs"/);
-  assert.match(html, /<pre><code class="language-sh">/);
+  assert.match(html, /<pre class="md-code-pre"><code class="language-sh">/);
+  assert.match(html, /class="md-code-head"/);
+  assert.match(html, /复制代码/);
   assert.match(html, /href="https:\/\/code.example\/api"/);
   assert.match(html, /curl/);
+});
+
+test('assistant messages show the model header and hover actions', () => {
+  const html = render(MessageBubble, {
+    msg: message({
+      original: 'Hello', model: 'claude-sonnet-4-5-20250929', ts: '2026-11-23T09:06:00',
+    }),
+    onRetry() {}, onSendAsIs() {},
+  });
+  assert.match(html, /class="assistant-head"/);
+  assert.match(html, /Sonnet 4\.5/);
+  assert.match(html, /09:06/);
+  assert.match(html, /class="message-actions"/);
+  assert.match(html, /复制/);
+});
+
+test('user messages expose their time, copy and composer refill actions', () => {
+  const html = render(MessageBubble, {
+    msg: message({ role: 'user', original: '你好', ts: '2026-11-23T09:05:00' }),
+    onRetry() {}, onSendAsIs() {}, onEditText() {},
+  });
+  assert.match(html, /class="message-time"/);
+  assert.match(html, /复制/);
+  assert.match(html, /编辑/);
 });
 
 test('user prompts and their English translation both expose clickable URLs', () => {

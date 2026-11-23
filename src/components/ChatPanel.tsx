@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { hasCJK, terminalSendPrompt, terminalWrite } from '../ipc';
 import { useChatStore, type Msg } from '../stores/chat';
@@ -26,10 +28,45 @@ function withFiles(text: string, files: string[]): string {
   return text.trim() ? `${text.trimEnd()} ${refs}` : refs;
 }
 
+const PIN_TOLERANCE = 40;
+const JUMP_THRESHOLD = 120;
+const FADE_SIZE = 28;
+const INPUT_COOLDOWN_MS = 150;
+
+/**
+ * The reference's 7-stop soft edge mask (28px): a power-law alpha ramp instead
+ * of a hard transparent cut, so the fade has no visible banding.
+ */
+function chatFade(top: number, bottom: number): string {
+  const t = (fraction: number) => `${Math.round(top * fraction)}px`;
+  const b = (fraction: number) => `calc(100% - ${Math.round(bottom * fraction)}px)`;
+  return `linear-gradient(to bottom,
+    transparent 0,
+    #0000000d ${t(0.15)},
+    #00000026 ${t(0.3)},
+    #0000004d ${t(0.45)},
+    #00000080 ${t(0.6)},
+    #000000b3 ${t(0.75)},
+    #000000d9 ${t(0.87)},
+    #000 ${t(1)},
+    #000 ${b(1)},
+    #000000d9 ${b(0.87)},
+    #000000b3 ${b(0.75)},
+    #00000080 ${b(0.6)},
+    #0000004d ${b(0.45)},
+    #00000026 ${b(0.3)},
+    #0000000d ${b(0.15)},
+    transparent 100%)`;
+}
+
+const prefersReducedMotion = () =>
+  window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
 export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; onOpenTerminal: () => void }) {
   const msgs = useChatStore((s) => s.byConv[convId]) ?? EMPTY_MESSAGES;
   const rows = useMemo(() => groupToolActivity(msgs), [msgs]);
   const terminal = useTerminalsStore((s) => s.byConv[convId]);
+  const busy = useTerminalsStore((s) => s.busyConv[convId] === true);
   const exited = useTerminalsStore((s) => (convId in s.exited ? s.exited[convId] : undefined));
   const latestPlan = latestPlanCall(msgs);
   const pendingPlan = latestPlan && !latestPlan.resolved ? latestPlan : null;
@@ -54,27 +91,49 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
   // user scrolled up to read), streaming updates must not yank the view down;
   // a floating button offers the jump instead.
   const atBottomRef = useRef(true);
-  const [atBottom, setAtBottom] = useState(true);
+  // The reference shows the jump control only once the user is well away from
+  // the bottom (120px), not as soon as pinning breaks (40px).
+  const [showJump, setShowJump] = useState(false);
+  const [fadeTop, setFadeTop] = useState(0);
+  const [fadeBottom, setFadeBottom] = useState(0);
+  // A wheel/touch/key event just before new content arrives must win over the
+  // auto-follow, or the view fights the user for a frame.
+  const lastInputAtRef = useRef(0);
   // The first content after a conversation switch is scrolled instantly; a
   // smooth animation racing the swapped content can leave the pane unpainted
   // in WKWebView until the next wheel scroll.
   const justSwitchedRef = useRef(false);
 
-  const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
+  const updateScrollState = useCallback((el: HTMLDivElement) => {
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    atBottomRef.current = distance <= PIN_TOLERANCE;
+    setShowJump(distance > JUMP_THRESHOLD);
+    setFadeTop(el.scrollTop > 2 ? FADE_SIZE : 0);
+    setFadeBottom(distance > 2 ? FADE_SIZE : 0);
+  }, []);
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     const el = messagesRef.current;
     if (!el) return;
     el.scrollTo({ top: el.scrollHeight, behavior });
     atBottomRef.current = true;
-    setAtBottom(true);
-  };
+    setShowJump(false);
+    if (behavior === 'auto') updateScrollState(el);
+  }, [updateScrollState]);
 
   const onMessagesScroll = () => {
     const el = messagesRef.current;
-    if (!el) return;
-    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-    atBottomRef.current = bottom;
-    setAtBottom(bottom);
+    if (el) updateScrollState(el);
   };
+
+  const markUserInput = () => { lastInputAtRef.current = performance.now(); };
+  const onMessagesKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(event.key)) {
+      markUserInput();
+    }
+  };
+
+  const maskImage = useMemo(() => chatFade(fadeTop, fadeBottom), [fadeTop, fadeBottom]);
 
   // One row by default; grow with content up to the CSS max-height so the
   // composer never reserves an empty second line (browser default is rows=2).
@@ -104,8 +163,7 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
     justSwitchedRef.current = true;
     // `scrollToBottom` also parks the list at the bottom.
     scrollToBottom();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [convId]);
+  }, [convId, scrollToBottom]);
 
   const lastMsg = msgs[msgs.length - 1];
   useEffect(() => {
@@ -116,10 +174,21 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
     // After a switch, wait for the conversation's first messages
     // (hydration/replay) so the whole initial jump stays instant.
     if (justSwitchedRef.current && msgs.length === 0) return;
-    scrollToBottom(justSwitchedRef.current ? 'auto' : 'smooth');
+    if (performance.now() - lastInputAtRef.current <= INPUT_COOLDOWN_MS) return;
+    // Streaming updates re-pin instantly; only the explicit jump animates.
+    scrollToBottom('auto');
     justSwitchedRef.current = false;
   }, [msgs.length, lastMsg?.translation, lastMsg?.original, planState.status?.available,
-    planState.submitting, planState.sent, planState.error, notice]);
+    planState.submitting, planState.sent, planState.error, notice, scrollToBottom]);
+
+  // Content can grow while the user is reading history; keep the edge fades
+  // and the jump threshold honest without stealing the scroll position.
+  useEffect(() => {
+    const el = messagesRef.current;
+    if (!el) return;
+    const frame = requestAnimationFrame(() => updateScrollState(el));
+    return () => cancelAnimationFrame(frame);
+  }, [msgs, updateScrollState]);
 
   const send = async (override?: string) => {
     if (planBlocked) {
@@ -206,6 +275,13 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
 
   const composerKeyboard = useComposerKeyboard(() => send());
 
+  // "Edit" on a user message refills the composer without sending.
+  const editText = useCallback((text: string) => {
+    setInput(text);
+    setNotice(null);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
+
   // Prompt submitted from the landing screen: wait until the PTY exists.
   useEffect(() => {
     if (!pending || exited !== undefined || planBlocked) return;
@@ -287,7 +363,15 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
 
   return (
     <div className="chat-panel">
-      <div className="messages" ref={messagesRef} onScroll={onMessagesScroll}>
+      <div
+        className="messages"
+        ref={messagesRef}
+        style={{ maskImage, WebkitMaskImage: maskImage }}
+        onScroll={onMessagesScroll}
+        onWheel={markUserInput}
+        onTouchStart={markUserInput}
+        onKeyDown={onMessagesKeyDown}
+      >
         {msgs.length === 0 && (
           <div className="msg-empty">
             用中文输入需求，会自动翻译成英文发送给 Claude Code；
@@ -295,8 +379,12 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
             Claude 的英文回复会自动翻译成中文显示。
           </div>
         )}
-        {rows.map((row) => row.type === 'tools' ? (
-          <ToolActivity key={row.key} messages={row.messages} />
+        {rows.map((row, index) => row.type === 'tools' ? (
+          <ToolActivity
+            key={row.key}
+            messages={row.messages}
+            live={busy && index === rows.length - 1}
+          />
         ) : (
           <MessageBubble
             key={row.key}
@@ -304,6 +392,7 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
             hideActivity={row.hideActivity}
             onRetry={retryTranslate}
             onSendAsIs={sendAsIs}
+            onEditText={editText}
             planControls={row.message.key === pendingPlan?.messageKey ? planControls : undefined}
           />
         ))}
@@ -312,11 +401,11 @@ export default function ChatPanel({ convId, onOpenTerminal }: { convId: string; 
       {notice && <div className="composer-notice">{notice}</div>}
 
       <div className="composer-wrap">
-        {!atBottom && (
+        {showJump && (
           <button
             className="scroll-bottom-btn"
             title="回到最新"
-            onClick={() => scrollToBottom()}
+            onClick={() => scrollToBottom(prefersReducedMotion() ? 'auto' : 'smooth')}
           >
             <ArrowDownIcon size={15} />
           </button>
